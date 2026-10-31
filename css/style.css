@@ -301,3 +301,12 @@ textarea { resize: vertical; line-height: 1.6; font-family: inherit; }
 
 .linklike { border: 0; background: none; color: var(--green-d); font-size: 13px; padding: 4px 0; cursor: pointer; text-decoration: underline; }
 .login-sep { height: 1px; background: #e6e9ee; margin: 16px 0 10px; }
+
+.bus-routes { display: flex; flex-direction: column; gap: 8px; }
+.bus-route { display: flex; gap: 8px; align-items: flex-start; }
+.bus-route-sw { width: 6px; align-self: stretch; min-height: 32px; border-radius: 3px; flex: none; }
+.stop-list { margin: 4px 0 0; padding-left: 22px; max-height: 260px; overflow: auto; }
+.stop-list li { font-size: 13px; }
+.stop-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.stop-list li::marker { color: var(--ink-3); }
+.stop-list .icon-btn { width: 26px; height: 26px; }

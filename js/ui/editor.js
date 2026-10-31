@@ -13,6 +13,7 @@ import { RoadLayer } from '../engine/roadlayer.js';
 import { createRoadTools } from './roadtool.js';
 import { createShapeTools } from './shapetool.js';
 import { createAddressTool } from './addrtool.js';
+import { createBusTool } from './bustool.js';
 
 const MAX_W = 5000;   // ペン最大 5km
 const wFromSlider = (s) => Math.max(1, Math.round(Math.pow(MAX_W, s / 1000)));
@@ -57,16 +58,18 @@ export async function startEditor(root, store, nav) {
   const borderT = createRoadTools({ view, F: features, session, layer: roadLayer, refreshPanel: () => renderOpts(), kind: 'border' });
   const lineInsts = [rt, railT, riverT, borderT];
   const addrT = createAddressTool({ view, F: features, session, layer: roadLayer, refreshPanel: () => renderOpts(), borderT });
+  const busT = createBusTool({ view, F: features, session, layer: roadLayer, refreshPanel: () => renderOpts() });
   const shapes = createShapeTools({ view, F: features, session, layer: roadLayer, refreshPanel: () => renderOpts(), store, roadTools: rt });
   view.layers.push({ draw: (c, v) => {
     if (st.tool === 'road' || st.tool === 'airport') rt.overlay.draw(c, v);
     if (st.tool === 'rail') railT.overlay.draw(c, v);
     if (st.tool === 'river') riverT.overlay.draw(c, v);
     if (st.tool === 'addr') addrT.overlay.draw(c, v);
+    if (st.tool === 'bus') busT.overlay.draw(c, v);
     if (st.tool === 'select') { for (const i of lineInsts) i.overlay.draw(c, v); shapes.overlay.draw(c, v); }
     if (['building', 'area', 'station', 'poi', 'airport'].includes(st.tool)) shapes.overlay.draw(c, v);
   } });
-  const validateAll = () => [rt.validate(), railT.validate(), riverT.validate(), borderT.validate(), addrT.validate(), shapes.validate()].some(Boolean);
+  const validateAll = () => [rt.validate(), railT.validate(), riverT.validate(), borderT.validate(), addrT.validate(), busT.validate(), shapes.validate()].some(Boolean);
   const busy = () => lineInsts.some((i) => i.isBusy()) || shapes.isBusy();
 
   // ---------- 選択ツール：道路・鉄道・川・交差点・駅・建物・範囲・施設を選んで編集 ----------
@@ -76,6 +79,8 @@ export async function startEditor(root, store, nav) {
     const clearAll = (except) => { for (const i of lineInsts) if (i !== except) i.deselect(); if (except !== shapes) shapes.clear(); };
     const lineSel = () => lineInsts.find((i) => i.hasSelection());
     function pick(w, p) {
+      const bs = busT.hitAt(p);
+      if (bs) { clearAll(); setTool('bus'); busT.selectStop(bs); return; }
       const sh = shapes.hitAt(w, p);
       if (sh?.strong) { clearAll(shapes); shapes.selectShape(sh.f.id); return; }
       let best = null;
@@ -128,7 +133,7 @@ export async function startEditor(root, store, nav) {
         const k = shapes.selectedKind();
         if (k) return shapes.renderPanel(box, k === 'area' || k === 'building' || k === 'station' || k === 'poi' ? k : 'building');
         box.replaceChildren(h('h3', {}, '選択'), h('div', { class: 'hint' },
-          h('div', {}, '道路・鉄道・川・交差点・駅・建物・範囲・施設をクリックすると、選んで編集できます。'),
+          h('div', {}, '道路・鉄道・川・交差点・駅・建物・範囲・施設・バス停をクリックすると、選んで編集できます。'),
           h('div', {}, '選んだ道路は中間点をドラッグ、線の上の「＋」で中間点を追加、端の中間点から延ばすこともできます。'),
           h('div', {}, '何もない所をドラッグすると地図を動かせます。')));
       },
@@ -194,6 +199,7 @@ export async function startEditor(root, store, nav) {
     rail: railT.roadTool,
     river: riverT.roadTool,
     addr: addrT.tool,
+    bus: busT.tool,
     select: selectTool,
     station: shapes.tools.station,
     airport: shapes.tools.airport,
@@ -308,6 +314,7 @@ export async function startEditor(root, store, nav) {
     ['building', 'building', '建物 (K)'],
     ['area', 'lasso', '範囲：IC・JCT・公園・森・山 (J)'],
     ['poi', 'pin', '施設・名所 (P)'],
+    ['bus', 'bus', 'バス停・バス路線 (U)'],
     ['addr', 'addr', '住所：境界線と地名 (L)'],
   ];
   const toolBtns = {};
@@ -371,6 +378,7 @@ export async function startEditor(root, store, nav) {
     if (st.tool === 'rail') railT.renderPanel(opts);
     if (st.tool === 'river') riverT.renderPanel(opts);
     if (st.tool === 'addr') addrT.renderPanel(opts);
+    if (st.tool === 'bus') busT.renderPanel(opts);
     if (st.tool === 'select') selectTool.renderPanel(opts);
     if (['building', 'area', 'station', 'poi', 'airport'].includes(st.tool)) shapes.renderPanel(opts, st.tool);
   }
@@ -487,6 +495,7 @@ export async function startEditor(root, store, nav) {
     else if (k === 'a') setTool('airport');
     else if (k === 'k') setTool('building');
     else if (k === 'p') setTool('poi');
+    else if (k === 'u') setTool('bus');
     else if (e.key === '[' || e.key === ']') { st.width = Math.max(1, Math.min(MAX_W, Math.round(st.width * (e.key === ']' ? 1.25 : 0.8)) + (e.key === ']' ? 1 : 0))); syncFields(); view.requestDraw(); }
     else if ((e.key === 'Delete' || e.key === 'Backspace') && st.tool === 'image' && overlays.selected) removeOverlay(overlays.selected);
   });

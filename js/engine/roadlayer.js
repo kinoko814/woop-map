@@ -9,6 +9,7 @@ import { AddressIndex } from './address.js';
 import { drawAddrTints, drawBorders, drawAddrLabels, drawAddrHighlight } from './addrlayer.js';
 import { drawRails, railVisible, drawStationShapes, drawStationMarks, drawExits } from './rails.js';
 import { drawAreaFills, drawBuildings, drawAreaLabels, drawPois, viewSpan, AREA_TYPES } from './shapes.js';
+import { drawBusRoutes, drawBusStops, routesAt } from './bus.js';
 
 const CASING = '#a9b1bb';
 const CASING_HIGH = '#8b939d';
@@ -40,7 +41,7 @@ export class RoadLayer {
   draw(ctx, v) {
     const mpp = v.mpp, vb = v.bounds(), span = viewSpan(v);
     const F = this.F;
-    const lists = { area: [], building: [], station: [], poi: [] };
+    const lists = { area: [], building: [], station: [], poi: [], busstop: [] };
     for (const f of F.items.values()) if (lists[f.kind]) lists[f.kind].push(this.shapeOverride?.get(f.id) || f);
     if (this.shapeDraft) (lists[this.shapeDraft.kind] ||= []).push(this.shapeDraft);
     const sel = this.selected;
@@ -85,12 +86,30 @@ export class RoadLayer {
     if (span < 3000) drawStationShapes(ctx, v, lists.station, F, sel);
     drawExits(ctx, v, lists.station);
 
+    // バス路線：表示モードではバス停を選んでいるときだけ、その停留所を通る路線を出す
+    //   編集モードのバスツール中は全部（選んでいる路線以外は薄く）
+    let busShown = [];
+    if (this.busAll) busShown = [...F.ofKind('busroute')];
+    else if (selF?.kind === 'busstop') busShown = routesAt(F, sel);
+    if (busShown.length) {
+      const act = this.busActive;
+      if (act && this.busAll) {
+        drawBusRoutes(ctx, v, F, busShown.filter((r) => r.id !== act), { dim: true });
+        drawBusRoutes(ctx, v, F, busShown.filter((r) => r.id === act));
+      } else drawBusRoutes(ctx, v, F, busShown);
+    }
+    const busHl = new Set();
+    if (!this.busAll || this.busActive) for (const r of busShown) if (!this.busActive || r.id === this.busActive) for (const id of r.stops || []) busHl.add(id);
+
     // 文字とアイコン（重ならないように場所を取り合う）
     // 縮尺バーが 200m を表示するくらいまで拡大したときだけ、アイコン類を出す（それより広いと道路と線路だけ）
     const taken = [];
     this.hits = { stations: [], pois: [], areas: [] };
     const icons = mpp < ICON_MPP;
     if (icons) this.hits.stations = drawStationMarks(ctx, v, lists.station, F, { onImage: () => v.requestDraw(), selectedId: sel, taken });
+    // バス停（路線を表示中なら、その停留所は少し縮小していても出す）
+    const stopsToDraw = icons || this.busAll ? lists.busstop : lists.busstop.filter((b) => busHl.has(b.id) || b.id === sel);
+    if (stopsToDraw.length && (icons || this.busAll || busHl.size)) this.hits.busstops = drawBusStops(ctx, v, stopsToDraw, sel, taken, { hl: busHl });
     // カテゴリ検索中（poiFilter）は、縮小していてもその施設だけ表示
     if (icons || this.poiFilter) this.hits.pois = drawPois(ctx, v, lists.poi, sel, taken, { only: this.poiFilter });
     drawRoadLabels(ctx, v, labelData, taken);

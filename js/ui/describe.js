@@ -21,7 +21,26 @@ export function describe(F, f, opts = {}) {
   if (f.kind === 'area') return describeZone(F, f);
   if (f.kind === 'station') return describeStation(F, f);
   if (f.kind === 'poi') return describePoi(F, f);
+  if (f.kind === 'busstop') return describeBusStop(F, f);
   return { title: f.name || '名前なし', kind: '', rows: [] };
+}
+
+function describeBusStop(F, s) {
+  const routes = [...F.ofKind('busroute')].filter((r) => (r.stops || []).includes(s.id));
+  const list = routes.length ? h('div', { class: 'bus-routes' }, ...routes.map((r) => {
+    const names = (r.stops || []).map((id) => F.get(id)?.name || '').filter(Boolean);
+    const ends = names.length ? `${names[0]} ⇄ ${names[names.length - 1]}` : '';
+    return h('div', { class: 'bus-route' },
+      h('span', { class: 'bus-route-sw', style: { background: r.color } }),
+      h('div', {}, h('b', {}, r.name || '名前なし'), h('div', { class: 'muted' }, [r.oneway ? ends.replace('⇄', '→') : ends, `${names.length}停留所`].filter(Boolean).join('・')),
+        r.desc ? h('div', { class: 'muted' }, r.desc) : null));
+  })) : h('span', { class: 'muted' }, 'このバス停を通る路線はまだありません');
+  return {
+    title: s.name || 'バス停',
+    kind: 'バス停', kindColor: '#1d6fd6',
+    desc: s.desc || '',
+    rows: [['住所', autoAddr(s, s.x, s.z)], ['座標', fmtXZ(s.x, s.z)], ['路線', list]],
+  };
 }
 
 function describeArea(F, a) {

@@ -48,10 +48,20 @@ async function runRemote() {
 
   const loggingIn = /access_token|code=/.test(location.href);
 
-  // URL だけで開いたとき：トップのマップを表示モードで
-  if (!mapId && !q.has('login') && !loggingIn) {
-    const home = await R.homeMap(sb).catch(() => null);
-    if (home) return openView(home.id, home.view_key, !!(await R.currentUser(sb)));
+  const homeErr = { e: null };
+  const home = loggingIn ? null : await R.homeMap(sb).catch((e) => { homeErr.e = e; return null; });
+
+  // URL だけで開いたとき、または表示モードの URL：ログインしていなくても表示モードで見られる
+  const wantView = !mapId ? !q.has('login') : q.get('mode') === 'view' || !q.get('mode');
+  if (wantView && !loggingIn) {
+    const loggedIn = !!(await R.currentUser(sb));
+    if (home && (!mapId || home.id === mapId)) return openView(home.id, home.view_key, loggedIn);
+    if (!loggedIn) {
+      const loginBtn = h('a', { class: 'btn primary', href: location.pathname + '?login' }, 'ログインする');
+      if (homeErr.e) return message('表示するマップを読み込めません', 'データベースの設定が古い可能性があります。Supabase の SQL Editor で supabase/schema.sql をもう一度実行してください。', loginBtn);
+      if (!mapId) return message('まだ公開されているマップがありません', '管理者がログインしてマップを作ると、ここに表示モードで表示されます。', loginBtn);
+      return message('このマップは表示用リンクが必要です', '管理者から共有リンク（…&key=…）を受け取って開いてください。', loginBtn);
+    }
   }
 
   // メールのリンクから戻ってきた直後はセッション確立を少し待つ
@@ -68,6 +78,8 @@ async function runRemote() {
 
   if (!mapId) {
     const maps = await R.listMyMaps(sb);
+    // トップに表示するマップがまだ無ければ、自分が管理するマップを自動でトップにする
+    if (!home && !homeErr.e) for (const m of maps) { try { await sb.rpc('set_home_map', { m: m.id }).then(({ error }) => { if (error) throw error; }); break; } catch (e) { /* 管理者でないマップは飛ばす */ } }
     return startDashboard(root, {
       maps, email: user.email,
       create: (name) => R.createMap(sb, name),

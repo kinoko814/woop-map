@@ -20,6 +20,8 @@ import { ADDR_LEVELS, levelIndex } from '../engine/address.js';
 import { routeRoad, routeTrain, fmtTime, MODES } from '../engine/route.js';
 import { createPlacePanel } from './place.js';
 import { describe, stationTitle } from './describe.js';
+import { BUS_STOP_COLOR } from '../engine/bus.js';
+const hubTitle = (f) => (!f ? '' : f.kind === 'busstop' ? `${f.name || 'バス停'}（バス停）` : stationTitle(f));
 
 const CATEGORIES = [['conv', 'コンビニ'], ['food', '食堂'], ['super', 'スーパー'], ['hotel', 'ホテル'], ['gas', 'ガソリンスタンド'], ['ev', 'EVスタンド'], ['hospital', '病院'], ['parking', '駐車場'], ['bank', '銀行'], ['pharmacy', '薬局']];
 
@@ -74,7 +76,8 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
     if (res && !res.error) {
       if (res.mode === 'train') for (const l of res.legs) {
         if (l.kind === 'rail') line(l.pts, railColor(l.rail), 6);
-        else if (l.kind === 'walk') line([l.from ? centroid(l.from.poly) : route.from.pt, l.to ? centroid(l.to.poly) : route.to.pt], '#2f6fcf', 3.5, [2, 7]);
+        else if (l.kind === 'bus') line(l.pts, l.bus.color || BUS_STOP_COLOR, 5.5);
+        else if (l.kind === 'walk' && l.pts.length > 1) line(l.pts, '#2f6fcf', 3.5, [2, 7]);
       }
       else line(res.pts, res.mode === 'car' ? '#2f6fcf' : '#25a06b', res.mode === 'car' ? 6 : 4.5, res.mode === 'walk' ? [2, 8] : null);
     }
@@ -119,6 +122,8 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   });
   function hitFeature(sx, sy, w) {
     const inBox = (q) => sx >= q.box[0] && sx <= q.box[2] && sy >= q.box[1] && sy <= q.box[3];
+    const bus = (layer.hits?.busstops || []).find((q) => Math.hypot(q.x - sx, q.y - sy) <= q.r);
+    if (bus) return features.get(bus.id);
     const poi = (layer.hits?.pois || []).find((q) => Math.hypot(q.x - sx, q.y - sy) <= q.r);
     if (poi) return features.get(poi.id);
     for (const k of ['stations', 'areas', 'addr']) { const q = (layer.hits?.[k] || []).find(inBox); if (q) return features.get(q.id); }
@@ -128,13 +133,13 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
       .sort((p, q) => polyArea(p.poly) - polyArea(q.poly))[0] || null;
   }
   const featPoint = (f) => (f.x !== undefined ? [f.x, f.z] : f.poly ? centroid(f.poly) : f.seeds?.[0] || [0, 0]);
-  const featLabel = (f) => (f.kind === 'station' ? stationTitle(f) : f.name || '名前なし');
+  const featLabel = (f) => (f.kind === 'station' || f.kind === 'busstop' ? hubTitle(f) : f.name || '名前なし');
   function open(f) {
     pin = null; placePopup();
     route.active = false;
     layer.selected = f.id; view.requestDraw();
     const info = describe(features, f, { addr: A });
-    if (f.kind === 'poi' || f.kind === 'station' || f.kind === 'area') {
+    if (f.kind === 'poi' || f.kind === 'station' || f.kind === 'area' || f.kind === 'busstop') {
       const pt = featPoint(f), label = featLabel(f);
       info.extra = h('div', { class: 'place-actions' },
         h('button', { class: 'btn', onclick: () => { setEnd('from', { pt, label }, false); openRoute(); } }, '出発地にする'),
@@ -174,6 +179,7 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
       let name = null, kind = '', iconEl = null;
       if (f.kind === 'poi') { name = f.name; kind = ICONS[f.icon]?.label; iconEl = iconSvg(f.icon, 22); }
       else if (f.kind === 'station') { name = stationTitle(f); kind = '駅'; }
+      else if (f.kind === 'busstop' && f.name) { name = f.name; kind = 'バス停'; }
       else if (f.kind === 'addr') { name = f.name; kind = ADDR_LEVELS[levelIndex(f.level)]?.label; }
       else if (f.kind === 'area' && f.name) { name = AREA_TYPES[f.type]?.outlineOnly ? `${f.name} ${f.type === 'jct' ? 'JCT' : 'IC'}` : f.name; kind = AREA_TYPES[f.type]?.label; }
       else if ((f.kind === 'road' || f.kind === 'rail' || f.kind === 'river') && f.name && !seenRoad.has(f.kind + f.name)) { seenRoad.add(f.kind + f.name); name = f.name; kind = f.kind === 'road' ? '道路' : f.kind === 'rail' ? RAIL_TYPES[f.type]?.label : '川'; }
@@ -181,14 +187,14 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
       if (!name) continue;
       const n = name.toLowerCase(), i = n.indexOf(q);
       if (i < 0) continue;
-      out.push({ f, name, kind, iconEl, score: (i === 0 ? 0 : 1) + n.length / 100 + (f.kind === 'poi' || f.kind === 'station' ? 0 : 0.3) });
+      out.push({ f, name, kind, iconEl, score: (i === 0 ? 0 : 1) + n.length / 100 + (f.kind === 'poi' || f.kind === 'station' || f.kind === 'busstop' ? 0 : 0.3) });
     }
     return out.sort((a, b) => a.score - b.score).slice(0, limit);
   }
   function resultRow(r, onPick) {
     const pt = r.f.kind === 'road' || r.f.kind === 'rail' || r.f.kind === 'river' ? null : featPoint(r.f);
     return h('button', { class: 'sug-item', onclick: () => onPick(r) },
-      r.iconEl || h('span', { class: 'sug-ic' }, r.f.kind === 'station' ? '駅' : r.f.kind === 'addr' ? '地' : r.f.kind === 'road' ? '道' : r.f.kind === 'rail' ? '線' : '・'),
+      r.iconEl || h('span', { class: 'sug-ic' }, r.f.kind === 'station' ? '駅' : r.f.kind === 'busstop' ? 'バ' : r.f.kind === 'addr' ? '地' : r.f.kind === 'road' ? '道' : r.f.kind === 'rail' ? '線' : '・'),
       h('span', { class: 'sug-txt' }, h('b', {}, r.name), h('span', { class: 'muted' }, [r.kind, pt ? A.addressText(...pt) : ''].filter(Boolean).join('・'))));
   }
   function flyTo(f) {
@@ -321,10 +327,11 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
       body.push(h('div', { class: 'route-sum' }, h('b', {}, fmtTime(res.time)), h('span', {}, fmtDist(res.len)), res.mode === 'train' ? h('span', { class: 'muted' }, `うち徒歩 ${fmtDist(res.walkLen)}`) : null));
       if (res.mode === 'train') body.push(h('ol', { class: 'legs' }, ...res.legs.map((l) => l.kind === 'rail'
         ? h('li', { class: 'leg rail' }, h('span', { class: 'leg-line', style: { background: railColor(l.rail) } }), h('div', {}, h('b', {}, l.rail.name || RAIL_TYPES[l.rail.type].label), h('div', { class: 'muted' }, `${stationTitle(l.from)} → ${stationTitle(l.to)}（${l.stops}駅・${fmtDist(l.len)}）`)))
+        : l.kind === 'bus' ? h('li', { class: 'leg rail' }, h('span', { class: 'leg-line', style: { background: l.bus.color || BUS_STOP_COLOR } }), h('div', {}, h('b', {}, `バス ${l.bus.name || ''}`), h('div', { class: 'muted' }, `${l.from?.name || 'バス停'} → ${l.to?.name || 'バス停'}（${l.stops}つ先・${fmtDist(l.len)}）`)))
         : l.kind === 'transfer' ? h('li', { class: 'leg' }, h('span', { class: 'leg-walk' }), h('div', { class: 'muted' }, `${stationTitle(l.from)}で乗り換え`))
-        : h('li', { class: 'leg' }, h('span', { class: 'leg-walk' }), h('div', { class: 'muted' }, `徒歩 ${fmtDist(l.len)}（約${fmtTime(l.len / (MODES.walk.speed / 3.6))}）${l.to ? ` → ${stationTitle(l.to)}` : ' → 目的地'}`)))));
+        : h('li', { class: 'leg' }, h('span', { class: 'leg-walk' }), h('div', { class: 'muted' }, `徒歩 ${fmtDist(l.len)}（約${fmtTime(l.len / (MODES.walk.speed / 3.6))}）${l.to ? ` → ${hubTitle(l.to)}` : ' → 目的地'}`)))));
       else body.push(h('ol', { class: 'legs' }, ...res.steps.slice(0, 30).map((s2) => h('li', { class: 'leg' }, h('span', { class: s2.highway ? 'leg-hw' : 'leg-road' }), h('div', {}, h('b', {}, s2.name), h('span', { class: 'muted' }, ` ${fmtDist(s2.len)}`))))));
-      body.push(h('p', { class: 'muted', style: { marginTop: '8px' } }, route.mode === 'train' ? '電車の時間は目安です（時刻表は考えていません）。' : `時間は平均の速さ（${route.mode === 'car' ? '一般道 時速40km・高速 時速80km' : route.mode === 'walk' ? '時速4.8km' : '時速15km'}）で計算した目安です。`));
+      body.push(h('p', { class: 'muted', style: { marginTop: '8px' } }, route.mode === 'train' ? '電車・バスの時間は目安です（時刻表は考えていません。乗るときの待ち時間を電車2分・バス3分として計算）。' : `時間は平均の速さ（${route.mode === 'car' ? '一般道 時速40km・高速 時速80km' : route.mode === 'walk' ? '時速4.8km' : '時速15km'}）で計算した目安です。`));
     }
     place.show({ title: '経路', kind: 'ルート検索', extra: h('div', { class: 'route-panel' }, ...body) });
   }
