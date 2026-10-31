@@ -13,7 +13,7 @@ export function riverVisible(r, mpp) {
   return mpp < Math.max(25, w * 2.5);
 }
 
-export function drawRivers(ctx, v, items) {
+export function drawRivers(ctx, v, items, isWater) {
   const sc = v.scale;
   const runs = [];
   for (const it of items) {
@@ -27,9 +27,54 @@ export function drawRivers(ctx, v, items) {
   if (!runs.length) return;
   ctx.save();
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-  for (const r of runs) { if (r.wpx < 3) continue; ctx.strokeStyle = RIVER_EDGE; ctx.lineWidth = r.wpx + 1.6; path(ctx, v, r.pts); ctx.stroke(); }
+  // 岸の線：海・湖（地形の「水」）の上には引かない → 川がそのまま海につながって見える
+  for (const r of runs) {
+    if (r.wpx < 3) continue;
+    const lw = r.wpx + 1.6;
+    ctx.strokeStyle = RIVER_EDGE; ctx.fillStyle = RIVER_EDGE; ctx.lineWidth = lw;
+    if (!isWater) { path(ctx, v, r.pts); ctx.stroke(); continue; }
+    for (const part of landParts(r.pts, r.w, isWater)) {
+      ctx.lineCap = 'butt'; path(ctx, v, part.pts); ctx.stroke();
+      // 陸の上で終わる端は丸く（水に入る端は切りっぱなし）
+      for (const [end, open] of [[part.pts[0], part.startOpen], [part.pts[part.pts.length - 1], part.endOpen]]) {
+        if (open) continue;
+        const [x, y] = v.toScreen(end[0], end[1]);
+        ctx.beginPath(); ctx.arc(x, y, lw / 2, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    ctx.lineCap = 'round';
+  }
   for (const r of runs) { ctx.strokeStyle = r.wpx < 3 ? RIVER_EDGE : RIVER_FILL; ctx.lineWidth = r.wpx; path(ctx, v, r.pts); ctx.stroke(); }
   ctx.restore();
+}
+
+/** 川の中心線を細かく調べて、陸の上を通る部分だけを取り出す。水に入る端は open=true */
+function landParts(pts, w, isWater) {
+  const step = Math.max(1, Math.min(16, w * 0.5));
+  const S = [];   // [x, z, water]
+  for (let k = 0; k < pts.length - 1; k++) {
+    const [ax, az] = pts[k], [bx, bz] = pts[k + 1];
+    const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / step));
+    for (let i = 0; i < n; i++) { const t = i / n; const x = ax + (bx - ax) * t, z = az + (bz - az) * t; S.push([x, z, isWater(x, z)]); }
+  }
+  const last = pts[pts.length - 1];
+  S.push([last[0], last[1], isWater(last[0], last[1])]);
+  const parts = [];
+  let cur = null;
+  for (let i = 0; i < S.length; i++) {
+    const [x, z, wet] = S[i];
+    if (!wet) {
+      if (!cur) {
+        cur = { pts: [], startOpen: false, endOpen: false };
+        if (i > 0) { const p = S[i - 1]; cur.pts.push([(p[0] + x) / 2, (p[1] + z) / 2]); cur.startOpen = true; }
+        parts.push(cur);
+      }
+      cur.pts.push([x, z]);
+    } else if (cur) {
+      const p = S[i - 1]; cur.pts.push([(p[0] + x) / 2, (p[1] + z) / 2]); cur.endOpen = true; cur = null;
+    }
+  }
+  return parts.filter((p) => p.pts.length >= 2);
 }
 
 /** 川の名前（青い斜体、川の向きに沿って） */

@@ -37,6 +37,7 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   const view = new MapView(canvas, terrain);
   view.showGrid = false;
   const layer = new RoadLayer(view, features);
+  layer.isWater = (x, z) => terrain.cell(x, z) === T.WATER;   // 川を海につなげて見せる
   view.layers.push(layer);
   const A = layer.addr;
 

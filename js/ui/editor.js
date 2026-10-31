@@ -49,6 +49,7 @@ export async function startEditor(root, store, nav) {
   const overlays = new OverlayLayer(view);
   view.layers.push(overlays);
   const roadLayer = new RoadLayer(view, features);
+  roadLayer.isWater = (x, z) => terrain.cell(x, z) === T.WATER;   // 川を海につなげて見せる
   roadLayer.edit = true;
   view.layers.push(roadLayer);
   view.fitAll();

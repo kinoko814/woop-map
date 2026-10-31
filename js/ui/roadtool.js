@@ -14,6 +14,10 @@ import { ADDR_LEVELS, levelIndex } from '../engine/address.js';
 import { imageToDataURL } from './dom.js';
 
 const SNAP_PX = 11;
+// スナップ（道路・鉄道ツールで共通。オン/オフは覚えておく）
+const SNAP = { on: true, alt: false };
+try { SNAP.on = localStorage.getItem('woop-snap') !== '0'; } catch (e) { /* 保存できない環境 */ }
+const setSnap = (on) => { SNAP.on = on; try { localStorage.setItem('woop-snap', on ? '1' : '0'); } catch (e) { /* 無視 */ } };
 
 export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 'road' }) {
   const isRail = kind === 'rail';
@@ -32,6 +36,9 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
   let press = null;     // クリックかドラッグ(パン)かの判定
   let hoverSnap = null;
   let fromEdit = false;   // 選択ツールの「延ばす・分岐」から描いているか
+  let guide = null;       // スナップの補助線 {o:[x,z], d:[dx,dz], label}
+  const snapOn = () => (kind === 'road' || isRail) && SNAP.on !== SNAP.alt;   // Alt を押している間は反転
+  const grid = (v) => Math.round(v);   // 1マス（1m）に吸着
 
   // ---------- 当たり判定 ----------
   function nodeAt(p, { exclude = null, onlyRoad = null } = {}) {
@@ -88,6 +95,81 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
       }
       return { seg: i, x: pts[0][0], z: pts[0][1], len: L };
     });
+  }
+
+  /** 線の向き（ノード n を通る線 line の、n での接線） */
+  function tangentAt(line, nid) {
+    const i = line.nodes.indexOf(nid);
+    if (i < 0) return null;
+    const a = layer.getNode(line.nodes[Math.max(0, i - 1)]), b = layer.getNode(line.nodes[Math.min(line.nodes.length - 1, i + 1)]);
+    if (!a || !b) return null;
+    const dx = b.x - a.x, dz = b.z - a.z, L = Math.hypot(dx, dz);
+    return L ? [dx / L, dz / L] : null;
+  }
+  /**
+   * カーソル位置を決める：つながる点（交差点・道路の上） → 角度（90度・平行・直進・縦横） → 1マス
+   * @returns {snap, w, guide}
+   */
+  function resolve(w, p) {
+    const last = draw ? (draw.atEnd ? draw.road.nodes[draw.road.nodes.length - 1] : draw.road.nodes[0]) : null;
+    const conn = snapAt(p, last);
+    if (conn?.node || !snapOn()) return { snap: conn, w, guide: null };
+    const O = last ? (draw.nodes.get(last) || F.get(last)) : null;
+    if (O && !conn) {
+      const dirs = [];
+      const add = (d, label) => { if (d) { dirs.push({ d, label }); dirs.push({ d: [-d[1], d[0]], label: label === '縦横' ? '縦横' : '90°' }); } };
+      add([1, 0], '縦横');
+      // 分岐元の道路（始点がほかの道路の上・交差点）に対して平行・直角
+      for (const rid of F.linesOf(last)) { const o = F.get(rid); if (o && o.kind === kind && o.id !== draw.road.id) add(tangentAt(o, last), '平行'); }
+      for (const ins of draw.inserts) if (ins.nodeId === last) { const o = F.get(ins.roadId); const t = o && tangentAtPoint(o, O); add(t, '平行'); }
+      // 描いている線の直前の向き（まっすぐ延ばす・直角に曲がる）
+      const r = draw.road, k = r.nodes.indexOf(last), prevId = draw.atEnd ? r.nodes[k - 1] : r.nodes[k + 1];
+      const P = prevId && (draw.nodes.get(prevId) || F.get(prevId));
+      if (P) { const dx = O.x - P.x, dz = O.z - P.z, L = Math.hypot(dx, dz); if (L) add([dx / L, dz / L], '直進'); }
+      // カーソルの近くの道路と平行
+      const near = roadAt(p) || nearRoad(p, 60);
+      if (near) { const t = tangentAtPoint(near.road, { x: near.x, z: near.z }); if (t) { dirs.push({ d: t, label: '平行' }); dirs.push({ d: [-t[1], t[0]], label: '90°' }); } }
+      const vx = w[0] - O.x, vz = w[1] - O.z;
+      let best = null;
+      for (const { d, label } of dirs) {
+        const t = vx * d[0] + vz * d[1];
+        const off = Math.abs(vx * d[1] - vz * d[0]) * view.scale;   // 補助線からの距離（画面のpx）
+        if (Math.abs(t) * view.scale < 12) continue;
+        if (off < 10 && (!best || off < best.off - 0.5 || (Math.abs(off - best.off) <= 0.5 && label === '直進'))) best = { d, t, off, label };
+      }
+      if (best) {
+        const t = Math.round(best.t);   // 長さを1m単位に
+        return { snap: null, w: [O.x + best.d[0] * t, O.z + best.d[1] * t], guide: { o: [O.x, O.z], d: best.d, label: best.label } };
+      }
+    }
+    if (conn) return { snap: conn, w, guide: null };
+    return { snap: null, w: [grid(w[0]), grid(w[1])], guide: null };
+  }
+  /** 道路の、点に一番近い所での向き */
+  function tangentAtPoint(line, pt) {
+    const g = layer.geom.get(line);
+    let best = null;
+    for (const pts of g.segs) for (let k = 0; k < pts.length - 1; k++) {
+      const [ax, az] = pts[k], [bx, bz] = pts[k + 1];
+      const dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz; if (!L2) continue;
+      let t = ((pt.x - ax) * dx + (pt.z - az) * dz) / L2; t = Math.max(0, Math.min(1, t));
+      const d = Math.hypot(ax + dx * t - pt.x, az + dz * t - pt.z);
+      if (!best || d < best.d) { const L = Math.sqrt(L2); best = { d, t: [dx / L, dz / L] }; }
+    }
+    return best?.t || null;
+  }
+  /** 画面で px 以内にある道路（道路の上でなくても、平行にそろえる相手を探す） */
+  function nearRoad(p, px) {
+    const [wx, wz] = view.toWorld(...p);
+    let best = null;
+    const b = view.bounds();
+    for (const r of F.ofKind(kind)) {
+      if (!visibleLine(r) || layer.hide.has(r.id) || (draw && r.id === draw.road.id)) continue;
+      const g = layer.geom.get(r);
+      if (g.bbox[0] > b.x1 || g.bbox[2] < b.x0 || g.bbox[1] > b.z1 || g.bbox[3] < b.z0) continue;
+      for (const pts of g.segs) { const hit = nearestOnPolyline(pts, wx, wz); if (hit.d * view.scale <= px && (!best || hit.d < best.d)) best = { road: r, x: hit.x, z: hit.z, d: hit.d }; }
+    }
+    return best;
   }
 
   // ---------- 描画（下書き） ----------
@@ -206,7 +288,10 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
         const tgt = nodeAt(p, { exclude: drag.id });
         drag.target = tgt;
         const n = F.get(drag.id);
-        layer.nodeOverride = new Map([[drag.id, { ...n, x: tgt ? tgt.x : w[0], z: tgt ? tgt.z : w[1] }]]);
+        SNAP.alt = !!e?.altKey;
+        const gw = snapOn() ? [grid(w[0]), grid(w[1])] : w;
+        drag.w = gw;
+        layer.nodeOverride = new Map([[drag.id, { ...n, x: tgt ? tgt.x : gw[0], z: tgt ? tgt.z : gw[1] }]]);
         hoverSnap = tgt ? { node: tgt } : null;
         view.requestDraw();
         return;
@@ -215,6 +300,7 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
       if (press?.moved) view.setView(press.x - (p[0] - press.p[0]) / view.scale, press.z - (p[1] - press.p[1]) / view.scale);
     },
     up(w, e, p) {
+      SNAP.alt = !!e?.altKey;
       if (drag) {
         const d = drag; drag = null;
         layer.nodeOverride = null; hoverSnap = null;
@@ -224,7 +310,8 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
               mergeNodes(tx, d.id, d.target.id);
               ai(tx, [...tx.roadsOf(d.target.id)]);
             } else {
-              const n = tx.edit(d.id); n.x = Math.round(w[0] * 10) / 10; n.z = Math.round(w[1] * 10) / 10;
+              const ww = d.w || w;
+              const n = tx.edit(d.id); n.x = Math.round(ww[0] * 10) / 10; n.z = Math.round(ww[1] * 10) / 10;
               ai(tx, [...tx.roadsOf(d.id)]);
             }
           });
@@ -237,19 +324,20 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
       click(w, p, editing);
     },
     hover(w, e, p) {
+      SNAP.alt = !!e?.altKey;
       if (draw) {
-        draw.cursor = w;
-        const last = draw.atEnd ? draw.road.nodes[draw.road.nodes.length - 1] : draw.road.nodes[0];
-        draw.snap = snapAt(p, last);
+        const r = resolve(w, p);
+        draw.cursor = r.w; draw.snap = r.snap; guide = r.guide;
         hoverSnap = draw.snap;
         syncDraft();
       } else if (!editing) {
         // 描き始めたらつながる場所を表示
-        hoverSnap = snapAt(p);
+        hoverSnap = snapAt(p) || (snapOn() ? { x: grid(w[0]), z: grid(w[1]), grid: true } : null);
+        guide = null;
         view.requestDraw();
       }
     },
-    deactivate() { cancelDraw(); sel = null; hoverSnap = null; view.requestDraw(); },
+    deactivate() { cancelDraw(); sel = null; hoverSnap = null; guide = null; view.requestDraw(); },
     key(e) {
       if (draw) {
         if (e.key === 'Enter' || e.key === 'Escape') { finishDraw(); return true; }
@@ -278,12 +366,13 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
       const [lx, ly] = view.toScreen(ln.x, ln.z);
       // 最後の点をもう一度クリック（ダブルクリック）で完了
       if (Math.hypot(lx - p[0], ly - p[1]) < SNAP_PX) { finishDraw(); return; }
-      addPoint(snapAt(p, last), w);
+      const r2 = resolve(w, p);
+      addPoint(r2.snap, r2.w);
       draw.lastClick = now;
       return;
     }
     // 描くツール：既存の道路や交差点の上でも、クリックした所から描き始める（つながる）
-    if (!editing) { sel = null; fromEdit = false; startDraw(snapAt(p), w); return; }
+    if (!editing) { sel = null; fromEdit = false; const sn = snapAt(p); startDraw(sn, sn || !snapOn() ? w : [grid(w[0]), grid(w[1])]); return; }
     // 選択中の道路の「＋」で中間点を追加
     if (sel?.roadId) {
       const road = F.get(sel.roadId);
@@ -406,7 +495,24 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
           }
         }
       }
-      if (hoverSnap) {
+      if (draw && guide) {
+        const [ox, oy] = v.toScreen(...guide.o);
+        const L = Math.hypot(v.w, v.h);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(31,124,111,.75)'; ctx.lineWidth = 1.2; ctx.setLineDash([6, 5]);
+        ctx.beginPath(); ctx.moveTo(ox - guide.d[0] * L, oy - guide.d[1] * L); ctx.lineTo(ox + guide.d[0] * L, oy + guide.d[1] * L); ctx.stroke();
+        ctx.setLineDash([]);
+        const [cx2, cy2] = v.toScreen(draw.cursor[0], draw.cursor[1]);
+        ctx.font = '700 11px system-ui'; const tw = ctx.measureText(guide.label).width;
+        ctx.fillStyle = '#1f7c6f'; roundRectPath(ctx, cx2 + 10, cy2 - 26, tw + 10, 17, 4); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'; ctx.fillText(guide.label, cx2 + 15, cy2 - 17.5);
+        ctx.restore();
+      }
+      if (hoverSnap?.grid) {
+        const [x, y] = v.toScreen(hoverSnap.x, hoverSnap.z);
+        ctx.strokeStyle = '#2fa392'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(x - 6, y); ctx.lineTo(x + 6, y); ctx.moveTo(x, y - 6); ctx.lineTo(x, y + 6); ctx.stroke();
+      } else if (hoverSnap) {
         const s = hoverSnap.node || hoverSnap;
         const [x, y] = v.toScreen(s.x, s.z);
         ctx.setLineDash([]);
@@ -432,7 +538,13 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
         seg2([['直線', false], ['曲線', true]], st.curve, (c) => { st.curve = c; syncDraft(); refreshPanel(); })),
       h('div', { class: 'row' }, h('label', { class: 'lbl' }, '高さ（これから置く中間点）'),
         seg2([['地上', 0], ['高架', 1], ['地下', -1]], st.lv, (lv) => { st.lv = lv; syncDraft(); refreshPanel(); })),
+      snapRow(),
     ];
+  }
+  function snapRow() {
+    return h('div', { class: 'row' },
+      h('label', { class: 'check', style: { margin: 0 } }, h('input', { type: 'checkbox', checked: SNAP.on, onchange: (e) => { setSnap(e.target.checked); view.requestDraw(); } }), 'スナップ'),
+      h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '2px' } }, '90度・平行・まっすぐ・縦横にそろえ、1マス（1m）に吸着します。Alt キーを押している間は一時的に切り替わります。'));
   }
 
   function renderPanel(box) {
@@ -615,6 +727,7 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
         seg2([['直線', false], ['曲線', true]], st.curve, (c) => { st.curve = c; syncDraft(); refreshPanel(); })),
       h('div', { class: 'row' }, h('label', { class: 'lbl' }, '高さ（これから置く中間点）'),
         seg2([['地上', 0], ['高架', 1], ['地下', -1]], st.lv, (lv) => { st.lv = lv; syncDraft(); refreshPanel(); })),
+      snapRow(),
     ];
     if (draw) {
       parts.push(h('div', { class: 'hint' },
@@ -758,4 +871,9 @@ function roadSwatch(type, color) {
   const t = ROAD_TYPES[type];
   const fill = t.walk ? '#fff' : ROAD_COLORS[color].fill;
   return h('span', { class: `rsw ${t.walk ? 'walk' : ''} ${t.divided ? 'div' : ''} ${t.oneway ? 'one' : ''}`, style: { '--f': fill } });
+}
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }

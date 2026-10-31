@@ -79,7 +79,7 @@ export class RoadLayer {
     }
     // 川は「地下の道路」と「地上の道路」のあいだに描く → 道路が必ず上になる
     drawBorders(ctx, v, borderItems, this.addrEdit, !this.edit);
-    const labelData = drawRoadItems(ctx, v, items, F, this.getNode, { deferLabels: true, beforeGround: () => drawRivers(ctx, v, riverItems) });
+    const labelData = drawRoadItems(ctx, v, items, F, this.getNode, { deferLabels: true, beforeGround: () => drawRivers(ctx, v, riverItems, this.isWater) });
     drawRails(ctx, v, railItems, this.getNode);
 
     // 駅の形（画面の幅が 3km より狭いとき）と出口
@@ -185,14 +185,25 @@ export function drawRoadItems(ctx, v, items, F, getNode, opts = {}) {
     const r = it.road, gn = it.getNode || getNode;
     const t = ROAD_TYPES[r.type] || ROAD_TYPES.normal;
     gByRoad.set(r.id, it.g);
-    let cur = null;
+    let cur = null, prevPts = null;
+    // 坂（両端の高さが違う区間）は真ん中で分け、それぞれの端の高さで描く
+    //   → 地上の交差点のすぐ隣から高架へ上がる道路でも、交差点の所は地上として描かれる
+    const pieces = [];
     it.g.segs.forEach((pts, i) => {
-      const lv = segLevel(r, i, gn);
       const w = r.segs[i]?.w || t.w;
-      if (cur && cur.lv !== lv) joints.push({ road: r, t, prev: it.g.segs[i - 1], next: pts, w: Math.max(w, r.segs[i - 1]?.w || w) });
-      if (cur && cur.lv === lv && cur.w === w) { for (let k = 1; k < pts.length; k++) cur.pts.push(pts[k]); }
-      else { cur = { road: r, t, lv, w, pts: pts.slice(), wpx: Math.max(w * sc, t.minPx) }; runs.push(cur); }
+      const la = gn(r.nodes[i])?.lv || 0, lb = gn(r.nodes[i + 1])?.lv || 0;
+      if (la === lb) { pieces.push({ pts, lv: la, w, n0: r.nodes[i], n1: r.nodes[i + 1] }); return; }
+      const [p1, p2] = splitHalf(pts);
+      pieces.push({ pts: p1, lv: la, w, n0: r.nodes[i], n1: null });
+      pieces.push({ pts: p2, lv: lb, w, n0: null, n1: r.nodes[i + 1] });
     });
+    for (const pc of pieces) {
+      const { pts, lv, w } = pc;
+      if (cur && cur.lv !== lv) joints.push({ road: r, t, prev: prevPts, next: pts, w: Math.max(w, cur.w) });
+      if (cur && cur.lv === lv && cur.w === w) { for (let k = 1; k < pts.length; k++) cur.pts.push(pts[k]); cur.n1 = pc.n1; }
+      else { cur = { road: r, t, lv, w, pts: pts.slice(), wpx: Math.max(w * sc, t.minPx), n0: pc.n0, n1: pc.n1 }; runs.push(cur); }
+      prevPts = pts;
+    }
   }
   // 交差点になっているノード
   const junctions = [];
@@ -204,6 +215,31 @@ export function drawRoadItems(ctx, v, items, F, getNode, opts = {}) {
     }
   }
   const prio = (run) => (run.t.air ? -1 : run.t.walk ? PRIORITY.walk : PRIORITY[run.road.color] ?? 1);
+  // 道路の端が、ほかの道路の「途中」につながっている所（T字路など）では、端を丸くせず
+  // 相手の道路の幅の中で切る。丸い端が相手の道路の外にはみ出して、高架のように見えるのを防ぐ
+  if (F) for (const run of runs) {
+    const r = run.road;
+    for (const [end, nid] of [['e0', run.n0], ['e1', run.n1]]) {
+      const idx = r.nodes.indexOf(nid);
+      if (!(end === 'e0' ? idx === 0 : r.nodes.lastIndexOf(nid) === r.nodes.length - 1)) continue;
+      let half = -1;
+      for (const oid of F.roadsOf(nid)) {
+        if (oid === r.id) continue;
+        const o = (items.find((it) => it.road.id === oid) || {}).road || F.get(oid);
+        if (!o) continue;
+        const k = o.nodes.indexOf(nid);
+        if (k <= 0 || k >= o.nodes.length - 1) continue;   // 相手もそこで終わっている（L字など）なら今までどおり丸く
+        const ow = Math.min(o.segs[k - 1]?.w || 0, o.segs[k]?.w || 0) || ROAD_TYPES[o.type]?.w || 8;
+        half = Math.max(half, ow / 2);
+      }
+      if (half < 0) continue;
+      // 端を相手の道路の向こう側の縁まで延ばして切る（交差点の中は優先度の高い色になる）
+      const pts = run.pts;
+      if (end === 'e1') { const a = pts[pts.length - 2], b = pts[pts.length - 1]; pts[pts.length - 1] = extend(a, b, half); }
+      else { const a = pts[1], b = pts[0]; pts[0] = extend(a, b, half); }
+      run[end] = true;
+    }
+  }
   ctx.save();
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   for (const lv of [-1, 0, 1]) {
@@ -217,7 +253,7 @@ export function drawRoadItems(ctx, v, items, F, getNode, opts = {}) {
     // 高架の影
     if (lv === 1) {
       ctx.strokeStyle = 'rgba(25,35,45,.16)';
-      for (const r of L) { if (r.wpx < 3) continue; ctx.lineWidth = r.wpx + cwOf(r.wpx) * 2 + 4; path(ctx, v, r.pts); ctx.stroke(); }
+      for (const r of L) { if (r.wpx < 3) continue; ctx.lineWidth = r.wpx + cwOf(r.wpx) * 2 + 4; strokeRun(ctx, v, r); }
     }
     // 縁取り
     for (const r of L) {
@@ -225,7 +261,7 @@ export function drawRoadItems(ctx, v, items, F, getNode, opts = {}) {
       ctx.strokeStyle = casing;
       ctx.lineWidth = r.wpx + cwOf(r.wpx) * 2;
       if (r.t.walk || lv === -1) ctx.setLineDash([Math.max(3, r.wpx), Math.max(2, r.wpx * 0.7)]);
-      path(ctx, v, r.pts); ctx.stroke();
+      strokeRun(ctx, v, r);
       ctx.setLineDash([]);
     }
     // 交差点の角の丸み（縁取り）
@@ -240,7 +276,7 @@ export function drawRoadItems(ctx, v, items, F, getNode, opts = {}) {
       if (r.wpx < 2.2 && r.road.color !== 'white') ctx.strokeStyle = darken(ROAD_COLORS[r.road.color]?.fill);
       if (r.t.fill) ctx.strokeStyle = r.t.fill;
       ctx.lineWidth = r.wpx;
-      path(ctx, v, r.pts); ctx.stroke();
+      strokeRun(ctx, v, r);
     }
     for (const { n, arms } of fil) {
       ctx.fillStyle = junctionColor(F, n.id, getNode);
@@ -306,6 +342,40 @@ export function drawRoadLabels(ctx, v, data, taken) {
 }
 
 // ---------- 高さの切り替わり用：折れ線の端から長さ len 分を取り出す ----------
+/** ひと続きの道路を描く。T字路で切る端（e0/e1）は四角く、それ以外の端は丸く */
+function strokeRun(ctx, v, r) {
+  path(ctx, v, r.pts);
+  if (!r.e0 && !r.e1) { ctx.stroke(); return; }
+  ctx.lineCap = 'butt'; ctx.stroke(); ctx.lineCap = 'round';
+  const rad = ctx.lineWidth / 2;
+  ctx.save(); ctx.fillStyle = ctx.strokeStyle; ctx.setLineDash([]);
+  for (const [cut, p] of [[r.e0, r.pts[0]], [r.e1, r.pts[r.pts.length - 1]]]) {
+    if (cut) continue;
+    const [x, y] = v.toScreen(p[0], p[1]);
+    ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+/** 折れ線を長さの半分の所で2つに分ける */
+function splitHalf(pts) {
+  let L = 0; for (let k = 1; k < pts.length; k++) L += Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]);
+  let d = L / 2;
+  for (let k = 1; k < pts.length; k++) {
+    const s = Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]);
+    if (d <= s) {
+      const t = s ? d / s : 0;
+      const m = [pts[k - 1][0] + (pts[k][0] - pts[k - 1][0]) * t, pts[k - 1][1] + (pts[k][1] - pts[k - 1][1]) * t];
+      return [[...pts.slice(0, k), m], [m, ...pts.slice(k)]];
+    }
+    d -= s;
+  }
+  return [pts, [pts[pts.length - 1], pts[pts.length - 1]]];
+}
+/** 点 b を、a→b の向きに len だけ延ばす */
+function extend(a, b, len) {
+  const dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz) || 1;
+  return [b[0] + (dx / L) * len, b[1] + (dz / L) * len];
+}
 function tail(pts, len) {
   const out = [pts[pts.length - 1]];
   for (let k = pts.length - 1; k > 0 && len > 0; k--) {
