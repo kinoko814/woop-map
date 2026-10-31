@@ -4,7 +4,8 @@
 //   ?map=ID&mode=edit      → 編集モード（ログイン＋権限が必要）
 //   ?map=ID&mode=admin     → 管理モード（管理者のみ）
 //   ?map=ID&mode=view      → 権限者が表示モードを確認
-//   パラメータなし         → ログイン / マップ一覧
+//   ?login                 → ログイン / マップ一覧
+//   パラメータなし         → トップのマップを表示モードで（無ければログイン）
 // =============================================================
 import { USE_SUPABASE } from './config.js';
 import { startEditor } from './ui/editor.js';
@@ -33,18 +34,28 @@ async function runRemote() {
   const mapId = q.get('map');
   const key = q.get('key');
 
-  // 表示モード（共有リンク）
-  if (mapId && key) {
-    const sb = await R.makeClient(key);
-    const store = new R.RemoteStore(sb, mapId, null);
+  const openView = async (id, k) => {
+    const vsb = await R.makeClient(k);
+    const store = new R.RemoteStore(vsb, id, null);
     try { await store.init(); } catch (e) { return message('マップを開けません', 'リンクが正しくないか、作り直された可能性があります。'); }
-    return startViewer(root, store);
-  }
+    return startViewer(root, store, { toLogin: () => go({ map: id, mode: 'edit' }) });
+  };
+
+  // 表示モード（共有リンク）
+  if (mapId && key) return openView(mapId, key);
 
   const sb = await R.makeClient(null);
+  const loggingIn = /access_token|code=/.test(location.href);
+
+  // URL だけで開いたとき：トップのマップを表示モードで
+  if (!mapId && !q.has('login') && !loggingIn) {
+    const home = await R.homeMap(sb).catch(() => null);
+    if (home) return openView(home.id, home.view_key);
+  }
+
   // メールのリンクから戻ってきた直後はセッション確立を少し待つ
   let user = await R.currentUser(sb);
-  if (!user && /access_token|code=/.test(location.href)) {
+  if (!user && loggingIn) {
     await new Promise((r) => setTimeout(r, 800));
     user = await R.currentUser(sb);
   }
@@ -60,8 +71,8 @@ async function runRemote() {
   }
 
   const store = new R.RemoteStore(sb, mapId, user);
-  try { await store.init(); } catch (e) { return message('マップを開けません', 'このマップの編集権限がありません。管理者に招待してもらってください。', h('a', { class: 'btn', href: location.pathname }, 'マップ一覧へ')); }
-  if (!store.role) return message('編集権限がありません', `${user.email} はこのマップの編集者に登録されていません。`, h('a', { class: 'btn', href: location.pathname }, 'マップ一覧へ'));
+  try { await store.init(); } catch (e) { return message('マップを開けません', 'このマップの編集権限がありません。管理者に招待してもらってください。', h('a', { class: 'btn', href: location.pathname + '?login' }, 'マップ一覧へ')); }
+  if (!store.role) return message('編集権限がありません', `${user.email} はこのマップの編集者に登録されていません。`, h('a', { class: 'btn', href: location.pathname + '?login' }, 'マップ一覧へ'));
 
   const mode = q.get('mode') || 'edit';
   const nav = (m) => go({ map: mapId, mode: m });

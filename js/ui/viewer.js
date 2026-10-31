@@ -23,7 +23,7 @@ import { describe, stationTitle } from './describe.js';
 
 const CATEGORIES = [['conv', 'コンビニ'], ['food', '食堂'], ['super', 'スーパー'], ['hotel', 'ホテル'], ['gas', 'ガソリンスタンド'], ['ev', 'EVスタンド'], ['hospital', '病院'], ['parking', '駐車場'], ['bank', '銀行'], ['pharmacy', '薬局']];
 
-export async function startViewer(root, store, { backToEdit } = {}) {
+export async function startViewer(root, store, { backToEdit, toLogin } = {}) {
   const map = store.map;
   const mb = boundsOf(map);
   const terrain = new Terrain({ bounds: mb });
@@ -57,6 +57,7 @@ export async function startViewer(root, store, { backToEdit } = {}) {
   const place = createPlacePanel(root, { onClose: () => { layer.selected = null; route.active = false; layer.poiFilter = null; markChips(); view.requestDraw(); } });
   root.append(search, chips, tools, coordsBox(view), zoomBox(view, { grid: false }));
   if (backToEdit) root.append(h('button', { class: 'btn v-back', onclick: backToEdit }, icon('edit'), '編集に戻る'));
+  else if (toLogin) root.append(h('button', { class: 'btn v-back', onclick: toLogin }, icon('edit'), 'ログインして編集'));
   view.fitAll();
 
   // ---------- 経路・距離の描画 ----------

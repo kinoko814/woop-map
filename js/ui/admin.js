@@ -45,6 +45,21 @@ export async function startAdmin(root, store, nav) {
       try { await store.regenerateViewKey(); link.value = linkOf(); toast('新しいリンクを作りました'); } catch (e) { toast('失敗しました'); }
     } }, 'リンクを作り直す'))));
 
+  // サイトのトップ
+  const homeState = h('p', { class: 'desc' }, '確認中…');
+  const homeBtn = h('button', { class: 'btn primary', hidden: true, onclick: async () => {
+    try { await store.setHome(); toast('トップに表示するようにしました'); showHome(); } catch (e) { toast(`変更できませんでした：${e.message || e}`); }
+  } }, 'このマップをトップに表示する');
+  const showHome = async () => {
+    const on = await store.isHome();
+    homeState.textContent = on
+      ? `このマップは、サイトのURL（${location.origin}${location.pathname}）を開いたときに表示モードで表示されます。`
+      : 'いまは別のマップ（または何も）がトップに表示されています。';
+    homeBtn.hidden = on;
+  };
+  inner.append(h('div', { class: 'card' }, h('h2', {}, 'サイトのトップ'), homeState, h('div', { class: 'btn-row' }, homeBtn)));
+  showHome();
+
   // 編集権限
   const list = h('div');
   const email = h('input', { type: 'email', placeholder: 'example@gmail.com' });
@@ -97,7 +112,7 @@ export function startDashboard(root, { maps, create, signOut, email }) {
   inner.append(h('div', { class: 'card' },
     h('h2', {}, '新しいマップを作る'), h('p', { class: 'desc' }, '作った人が最初の管理者になります。'),
     h('div', { class: 'inline' }, name, h('button', { class: 'btn primary', onclick: async () => {
-      try { const id = await create(name.value.trim() || '新しいマップ'); location.href = `?map=${id}&mode=edit`; } catch (e) { toast('作成に失敗しました'); }
+      try { const id = await create(name.value.trim() || '新しいマップ'); location.href = `?map=${id}&mode=edit`; } catch (e) { console.error(e); toast(`作成に失敗しました：${e.message || e}`, 8000); }
     } }, '作成'))));
   inner.append(h('div', { class: 'card maplist' },
     h('h2', {}, 'あなたが編集できるマップ'),

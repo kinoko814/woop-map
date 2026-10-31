@@ -39,7 +39,15 @@ export async function listMyMaps(sb) {
 export async function createMap(sb, name) {
   const { data, error } = await sb.from('maps').insert({ name }).select('id').single();
   if (error) throw error;
+  // トップに出すマップがまだ無ければ、最初に作ったマップをトップにする
+  try { if (!(await homeMap(sb))) await sb.rpc('set_home_map', { m: data.id }); } catch (e) { /* 失敗しても作成自体は成功 */ }
   return data.id;
+}
+// サイトのトップに表示モードで出すマップ（{ id, view_key } か null）
+export async function homeMap(sb) {
+  const { data, error } = await sb.rpc('home_map');
+  if (error) throw error;
+  return (Array.isArray(data) ? data[0] : data) || null;
 }
 
 // ---------- 1枚のマップを扱うストア ----------
@@ -221,6 +229,14 @@ export class RemoteStore {
     const { error } = await this.sb.from('maps').update(v).eq('id', this.mapId);
     if (error) throw error;
     Object.assign(this.map, v);
+  }
+  async isHome() {
+    const h = await homeMap(this.sb).catch(() => null);
+    return h?.id === this.mapId;
+  }
+  async setHome() {
+    const { error } = await this.sb.rpc('set_home_map', { m: this.mapId });
+    if (error) throw error;
   }
   async regenerateViewKey() {
     const key = crypto.randomUUID().replace(/-/g, '');
