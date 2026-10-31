@@ -37,7 +37,9 @@ export async function listMyMaps(sb) {
   return data;
 }
 export async function createMap(sb, name) {
-  const { data, error } = await sb.from('maps').insert({ name }).select('id').single();
+  // id はこちらで決めて、作った行を読み返さない（データベースの設定が古くても作成できるように）
+  const data = { id: crypto.randomUUID() };
+  const { error } = await sb.from('maps').insert({ id: data.id, name });
   if (error) throw error;
   // トップに出すマップがまだ無ければ、最初に作ったマップをトップにする
   try { if (!(await homeMap(sb))) await sb.rpc('set_home_map', { m: data.id }); } catch (e) { /* 失敗しても作成自体は成功 */ }
