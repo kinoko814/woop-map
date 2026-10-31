@@ -34,23 +34,24 @@ async function runRemote() {
   const mapId = q.get('map');
   const key = q.get('key');
 
-  const openView = async (id, k) => {
+  let sb = null;
+  const openView = async (id, k, loggedIn) => {
     const vsb = await R.makeClient(k);
     const store = new R.RemoteStore(vsb, id, null);
     try { await store.init(); } catch (e) { return message('マップを開けません', 'リンクが正しくないか、作り直された可能性があります。'); }
-    return startViewer(root, store, { toLogin: () => go({ map: id, mode: 'edit' }) });
+    return startViewer(root, store, { toLogin: () => go({ map: id, mode: 'edit' }), loggedIn });
   };
 
   // 表示モード（共有リンク）
-  if (mapId && key) return openView(mapId, key);
+  sb = await R.makeClient(null);
+  if (mapId && key) return openView(mapId, key, !!(await R.currentUser(sb)));
 
-  const sb = await R.makeClient(null);
   const loggingIn = /access_token|code=/.test(location.href);
 
   // URL だけで開いたとき：トップのマップを表示モードで
   if (!mapId && !q.has('login') && !loggingIn) {
     const home = await R.homeMap(sb).catch(() => null);
-    if (home) return openView(home.id, home.view_key);
+    if (home) return openView(home.id, home.view_key, !!(await R.currentUser(sb)));
   }
 
   // メールのリンクから戻ってきた直後はセッション確立を少し待つ
@@ -59,7 +60,7 @@ async function runRemote() {
     await new Promise((r) => setTimeout(r, 800));
     user = await R.currentUser(sb);
   }
-  if (!user) return startLogin(root, (email) => R.sendLoginMail(sb, email));
+  if (!user) return startLogin(root, (email) => R.sendLoginMail(sb, email), (email, code) => R.verifyLoginCode(sb, email, code));
 
   if (!mapId) {
     const maps = await R.listMyMaps(sb);

@@ -13,7 +13,10 @@ export async function makeClient(viewKey) {
   const { createClient } = await lib();
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: viewKey ? { headers: { 'x-map-key': viewKey } } : {},
-    auth: { persistSession: !viewKey, storageKey: 'woopmap-auth' },
+    // ログインはこのブラウザに保存して自動更新（ログアウトするまで続く）。表示モード用は保存しない
+    auth: viewKey
+      ? { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false, storageKey: 'woopmap-view' }
+      : { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storageKey: 'woopmap-auth' },
   });
 }
 
@@ -27,6 +30,11 @@ export async function sendLoginMail(sb, email) {
     email,
     options: { emailRedirectTo: location.origin + location.pathname + location.search },
   });
+  if (error) throw error;
+}
+
+export async function verifyLoginCode(sb, email, token) {
+  const { error } = await sb.auth.verifyOtp({ email, token, type: 'email' });
   if (error) throw error;
 }
 

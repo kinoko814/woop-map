@@ -165,9 +165,23 @@ export class MapSession {
       console.error(e);
       keys.forEach((k) => this.dirty.add(k));
       fids.forEach((id) => this.dirtyFeat.add(id));
-      this.onStatus('error', '保存に失敗しました。自動で再試行します');
+      this.lastError = e;
+      this.onStatus('error', `保存に失敗しました（${e.message || e}）。自動で再試行します`);
       clearTimeout(this.saveTimer); this.saveTimer = setTimeout(() => this.flush(), 4000);
     } finally { this.saving = false; }
+  }
+
+  /** 今すぐ保存（保存ボタン用）。全部保存できたら true */
+  async saveNow() {
+    clearTimeout(this.saveTimer);
+    await this.chain;                      // 塗りつぶしなど処理中の操作を待つ
+    this.lastError = null;
+    for (let i = 0; i < 50 && this.hasUnsaved; i++) {
+      if (this.saving) { await new Promise((r) => setTimeout(r, 200)); continue; }
+      await this.flush();
+      if (this.lastError) return false;
+    }
+    return !this.hasUnsaved;
   }
 
   /** 保存内容を決める：スーパーチャンクごとに代表値を出し、違うものだけ個別保存 */

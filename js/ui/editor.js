@@ -30,9 +30,10 @@ export async function startEditor(root, store, nav) {
   const people = h('div', { class: 'people' });
   const undoBtn = h('button', { class: 'icon-btn', title: '元に戻す (Ctrl+Z)', disabled: true, onclick: () => session.undo() }, icon('undo'));
   const redoBtn = h('button', { class: 'icon-btn', title: 'やり直す (Ctrl+Shift+Z)', disabled: true, onclick: () => session.redo() }, icon('redo'));
+  const saveBtn = h('button', { class: 'btn save-btn', title: '保存 (Ctrl+S)', onclick: () => saveNow() }, icon('save'), '保存');
   const top = h('div', { class: 'ed-top' },
     logo(), h('span', { class: 'mapname' }, map.name), h('span', { class: 'badge' }, '編集モード'),
-    undoBtn, redoBtn, status,
+    undoBtn, redoBtn, saveBtn, status,
     h('div', { class: 'spacer' }), people,
     h('button', { class: 'btn', onclick: () => nav('view') }, icon('view'), '表示'),
     store.role === 'admin' ? h('button', { class: 'btn', onclick: () => nav('admin') }, icon('settings'), '管理') : null,
@@ -148,6 +149,13 @@ export async function startEditor(root, store, nav) {
   const undo = () => { if (busy()) return; session.undo().then(() => { validateAll(); renderOpts(); }); };
   const redo = () => { if (busy()) return; session.redo().then(() => { validateAll(); renderOpts(); }); };
   undoBtn.onclick = undo; redoBtn.onclick = redo;
+  async function saveNow() {
+    saveBtn.disabled = true;
+    try {
+      const ok = await session.saveNow();
+      toast(ok ? '保存しました' : '保存に失敗しました。通信状態を確認してもう一度押してください', ok ? 1600 : 5000);
+    } finally { saveBtn.disabled = false; }
+  }
   window.addEventListener('beforeunload', (e) => { if (session.hasUnsaved) { e.preventDefault(); e.returnValue = ''; } });
 
   // ---------- ツール ----------
@@ -456,9 +464,10 @@ export async function startEditor(root, store, nav) {
 
   // ---------- キーボード ----------
   window.addEventListener('keydown', (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveNow(); return; }
     const tag = e.target.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-    const mod = e.ctrlKey || e.metaKey;
     if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
     if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
     if (mod) return;

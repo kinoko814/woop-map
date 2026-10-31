@@ -90,19 +90,31 @@ export async function startAdmin(root, store, nav) {
 }
 
 // ---------- ログイン ----------
-export function startLogin(root, sendMail) {
+export function startLogin(root, sendMail, verifyCode) {
   const email = h('input', { type: 'email', placeholder: 'メールアドレス', autocomplete: 'email' });
   const msg = h('div', { class: 'muted', style: { marginTop: '10px' } });
   const btn = h('button', { class: 'btn primary', style: { width: '100%', justifyContent: 'center', marginTop: '10px' }, onclick: async () => {
     const v = email.value.trim();
     if (!/^\S+@\S+\.\S+$/.test(v)) { msg.textContent = 'メールアドレスを確認してください'; return; }
     btn.disabled = true; msg.textContent = '送信中…';
-    try { await sendMail(v); msg.textContent = `${v} にログイン用のリンクを送りました。メールを開いてリンクを押してください。`; }
+    try { await sendMail(v); msg.textContent = `${v} にログイン用のメールを送りました。メールのリンクを押すか、メールに書かれたコードを下に入れてください。`; codeBox.hidden = false; }
     catch (e) { msg.textContent = `送信できませんでした：${e.message || e}`; btn.disabled = false; }
-  } }, 'ログインリンクを送る');
+  } }, 'ログインメールを送る');
+  // メールのリンクを別のブラウザ（スマホのメールアプリ内など）で開くと、そちらでログインしてしまうため、コードでもログインできるように
+  const code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: 'メールに書かれたコード', maxlength: 10 });
+  const codeMsg = h('div', { class: 'muted', style: { marginTop: '8px' } });
+  const codeBtn = h('button', { class: 'btn', style: { width: '100%', justifyContent: 'center', marginTop: '8px' }, onclick: async () => {
+    const t = code.value.replace(/\s/g, '');
+    if (!/^\d{6,10}$/.test(t)) { codeMsg.textContent = '数字のコードを入れてください'; return; }
+    codeBtn.disabled = true; codeMsg.textContent = '確認中…';
+    try { await verifyCode(email.value.trim(), t); location.reload(); }
+    catch (e) { codeMsg.textContent = `ログインできませんでした：${e.message || e}`; codeBtn.disabled = false; }
+  } }, 'コードでログイン');
+  const codeBox = h('div', { hidden: true, style: { marginTop: '14px' } }, code, codeBtn, codeMsg);
   root.replaceChildren(h('div', { class: 'page' }, h('div', { class: 'login' },
     logo(), h('h1', {}, '編集・管理にはログイン'), h('div', { class: 'muted' }, 'パスワードは不要です。メールに届くリンクからログインします。'),
-    h('div', { class: 'card' }, h('label', { class: 'muted' }, 'メールアドレス'), email, btn, msg))));
+    h('div', { class: 'card' }, h('label', { class: 'muted' }, 'メールアドレス'), email, btn, msg, codeBox),
+    h('div', { class: 'muted', style: { fontSize: '12px' } }, '一度ログインすれば、このブラウザではログアウトするまでログインしたままになります。'))));
 }
 
 // ---------- マップ一覧 ----------
