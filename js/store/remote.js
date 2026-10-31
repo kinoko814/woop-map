@@ -33,6 +33,14 @@ export async function sendLoginMail(sb, email) {
   if (error) throw error;
 }
 
+export async function signInWithPassword(sb, email, password) {
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+}
+export async function setPassword(sb, password) {
+  const { error } = await sb.auth.updateUser({ password });
+  if (error) throw error;
+}
 export async function verifyLoginCode(sb, email, token) {
   const { error } = await sb.auth.verifyOtp({ email, token, type: 'email' });
   if (error) throw error;

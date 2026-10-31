@@ -60,13 +60,18 @@ async function runRemote() {
     await new Promise((r) => setTimeout(r, 800));
     user = await R.currentUser(sb);
   }
-  if (!user) return startLogin(root, (email) => R.sendLoginMail(sb, email), (email, code) => R.verifyLoginCode(sb, email, code));
+  if (!user) return startLogin(root, {
+    password: (email, pw) => R.signInWithPassword(sb, email, pw),
+    sendMail: (email) => R.sendLoginMail(sb, email),
+    verifyCode: (email, code) => R.verifyLoginCode(sb, email, code),
+  });
 
   if (!mapId) {
     const maps = await R.listMyMaps(sb);
     return startDashboard(root, {
       maps, email: user.email,
       create: (name) => R.createMap(sb, name),
+      setPassword: (pw) => R.setPassword(sb, pw),
       signOut: async () => { await sb.auth.signOut(); location.href = location.pathname; },
     });
   }

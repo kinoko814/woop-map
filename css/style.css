@@ -34,7 +34,7 @@ button { cursor: pointer; }
 .icon-btn:hover { background: #eef1f4; }
 .icon-btn:disabled { opacity: .35; }
 svg.ic { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-input[type=text], input[type=email], input[type=number], input[type=url], input[type=time], select, textarea { border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; background: #fff; width: 100%; }
+input[type=text], input[type=email], input[type=password], input[type=number], input[type=url], input[type=time], select, textarea { border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; background: #fff; width: 100%; }
 input:focus, select:focus { outline: 2px solid rgba(117, 210, 195, .35); border-color: var(--green); }
 input[type=range] { width: 100%; accent-color: var(--green); }
 .muted { color: var(--ink-3); font-size: 12px; }
@@ -298,3 +298,6 @@ textarea { resize: vertical; line-height: 1.6; font-family: inherit; }
 .leg-road, .leg-hw { width: 6px; min-height: 18px; align-self: stretch; border-radius: 3px; flex: none; background: #c3c9d0; }
 .leg-hw { background: #ffb867; }
 @media (max-width: 640px) { .v-chips { left: 12px; right: 12px; top: 68px; } .v-tools { top: 112px; } }
+
+.linklike { border: 0; background: none; color: var(--green-d); font-size: 13px; padding: 4px 0; cursor: pointer; text-decoration: underline; }
+.login-sep { height: 1px; background: #e6e9ee; margin: 16px 0 10px; }

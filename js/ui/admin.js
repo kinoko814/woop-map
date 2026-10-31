@@ -90,35 +90,89 @@ export async function startAdmin(root, store, nav) {
 }
 
 // ---------- ログイン ----------
-export function startLogin(root, sendMail, verifyCode) {
+// auth = { password(email, pw), sendMail(email), verifyCode(email, code) }
+export function startLogin(root, auth) {
+  const full = { width: '100%', justifyContent: 'center', marginTop: '10px' };
   const email = h('input', { type: 'email', placeholder: 'メールアドレス', autocomplete: 'email' });
+  const okEmail = () => { const v = email.value.trim(); return /^\S+@\S+\.\S+$/.test(v) ? v : null; };
+
+  // パスワードでログイン
+  const pw = h('input', { type: 'password', placeholder: 'パスワード', autocomplete: 'current-password', style: { marginTop: '8px' },
+    onkeydown: (e) => { if (e.key === 'Enter') pwBtn.click(); } });
+  const pwMsg = h('div', { class: 'muted', style: { marginTop: '8px' } });
+  const pwBtn = h('button', { class: 'btn primary', style: full, onclick: async () => {
+    const v = okEmail();
+    if (!v) { pwMsg.textContent = 'メールアドレスを確認してください'; return; }
+    if (!pw.value) { pwMsg.textContent = 'パスワードを入れてください'; return; }
+    pwBtn.disabled = true; pwMsg.textContent = 'ログイン中…';
+    try { await auth.password(v, pw.value); location.reload(); }
+    catch (e) {
+      pwMsg.textContent = /invalid login credentials/i.test(e.message || '')
+        ? 'メールアドレスかパスワードが違います。パスワードをまだ作っていない場合は、下の「メールでログイン」から入ってください。'
+        : `ログインできませんでした：${e.message || e}`;
+      pwBtn.disabled = false;
+    }
+  } }, 'ログイン');
+
+  // メールでログイン（初回・パスワードを忘れたとき）
   const msg = h('div', { class: 'muted', style: { marginTop: '10px' } });
-  const btn = h('button', { class: 'btn primary', style: { width: '100%', justifyContent: 'center', marginTop: '10px' }, onclick: async () => {
-    const v = email.value.trim();
-    if (!/^\S+@\S+\.\S+$/.test(v)) { msg.textContent = 'メールアドレスを確認してください'; return; }
+  const btn = h('button', { class: 'btn', style: full, onclick: async () => {
+    const v = okEmail();
+    if (!v) { msg.textContent = 'メールアドレスを確認してください'; return; }
     btn.disabled = true; msg.textContent = '送信中…';
-    try { await sendMail(v); msg.textContent = `${v} にログイン用のメールを送りました。メールのリンクを押すか、メールに書かれたコードを下に入れてください。`; codeBox.hidden = false; }
-    catch (e) { msg.textContent = `送信できませんでした：${e.message || e}`; btn.disabled = false; }
+    try { await auth.sendMail(v); msg.textContent = `${v} にログイン用のメールを送りました。メールのリンクを押すか、メールに書かれたコードを下に入れてください。`; codeBox.hidden = false; }
+    catch (e) {
+      msg.textContent = /rate limit/i.test(e.message || '')
+        ? 'メールの送信回数の上限に達しました。しばらく（1時間ほど）待ってからもう一度送ってください。'
+        : `送信できませんでした：${e.message || e}`;
+      btn.disabled = false;
+    }
   } }, 'ログインメールを送る');
-  // メールのリンクを別のブラウザ（スマホのメールアプリ内など）で開くと、そちらでログインしてしまうため、コードでもログインできるように
   const code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: 'メールに書かれたコード', maxlength: 10 });
   const codeMsg = h('div', { class: 'muted', style: { marginTop: '8px' } });
-  const codeBtn = h('button', { class: 'btn', style: { width: '100%', justifyContent: 'center', marginTop: '8px' }, onclick: async () => {
+  const codeBtn = h('button', { class: 'btn', style: { ...full, marginTop: '8px' }, onclick: async () => {
     const t = code.value.replace(/\s/g, '');
     if (!/^\d{6,10}$/.test(t)) { codeMsg.textContent = '数字のコードを入れてください'; return; }
     codeBtn.disabled = true; codeMsg.textContent = '確認中…';
-    try { await verifyCode(email.value.trim(), t); location.reload(); }
+    try { await auth.verifyCode(email.value.trim(), t); location.reload(); }
     catch (e) { codeMsg.textContent = `ログインできませんでした：${e.message || e}`; codeBtn.disabled = false; }
   } }, 'コードでログイン');
   const codeBox = h('div', { hidden: true, style: { marginTop: '14px' } }, code, codeBtn, codeMsg);
+  const mailBox = h('div', { hidden: true, style: { marginTop: '6px' } },
+    h('p', { class: 'desc' }, '初めての方・パスワードを忘れた方は、メールに届くリンクでログインし、マップ一覧の画面でパスワードを作ってください。'),
+    btn, msg, codeBox);
+  const mailToggle = h('button', { class: 'linklike', onclick: () => { mailBox.hidden = false; mailToggle.hidden = true; } },
+    'パスワードがまだない・忘れた → メールでログイン');
+
   root.replaceChildren(h('div', { class: 'page' }, h('div', { class: 'login' },
-    logo(), h('h1', {}, '編集・管理にはログイン'), h('div', { class: 'muted' }, 'パスワードは不要です。メールに届くリンクからログインします。'),
-    h('div', { class: 'card' }, h('label', { class: 'muted' }, 'メールアドレス'), email, btn, msg, codeBox),
+    logo(), h('h1', {}, '編集・管理にはログイン'),
+    h('div', { class: 'card' },
+      h('label', { class: 'muted' }, 'メールアドレス'), email, pw, pwBtn, pwMsg,
+      h('div', { class: 'login-sep' }), mailToggle, mailBox),
     h('div', { class: 'muted', style: { fontSize: '12px' } }, '一度ログインすれば、このブラウザではログアウトするまでログインしたままになります。'))));
 }
 
+// パスワードの設定・変更カード
+function passwordCard(setPassword) {
+  const a = h('input', { type: 'password', placeholder: '新しいパスワード（8文字以上）', autocomplete: 'new-password' });
+  const b2 = h('input', { type: 'password', placeholder: 'もう一度', autocomplete: 'new-password', style: { marginTop: '8px' } });
+  const msg = h('div', { class: 'muted', style: { marginTop: '8px' } });
+  const btn = h('button', { class: 'btn primary', style: { marginTop: '10px' }, onclick: async () => {
+    if (a.value.length < 8) { msg.textContent = '8文字以上にしてください'; return; }
+    if (a.value !== b2.value) { msg.textContent = '2つのパスワードが一致しません'; return; }
+    btn.disabled = true; msg.textContent = '保存中…';
+    try { await setPassword(a.value); a.value = b2.value = ''; msg.textContent = 'パスワードを設定しました。次からはメールアドレスとパスワードでログインできます。'; }
+    catch (e) {
+      msg.textContent = /different from the old/i.test(e.message || '') ? '今と同じパスワードです' : `設定できませんでした：${e.message || e}`;
+    } finally { btn.disabled = false; }
+  } }, 'パスワードを設定');
+  return h('div', { class: 'card' }, h('h2', {}, 'パスワード'),
+    h('p', { class: 'desc' }, 'パスワードを作ると、次からはメールを送らずにメールアドレスとパスワードでログインできます。変更もここからできます。'),
+    h('div', { style: { maxWidth: '360px' } }, a, b2, btn, msg));
+}
+
 // ---------- マップ一覧 ----------
-export function startDashboard(root, { maps, create, signOut, email }) {
+export function startDashboard(root, { maps, create, signOut, email, setPassword }) {
   const inner = pageShell(root, email, null, h('button', { class: 'btn', onclick: signOut }, icon('logout'), 'ログアウト'));
   const name = h('input', { type: 'text', placeholder: '新しいマップの名前（例：ウープ島）' });
   inner.append(h('div', { class: 'card' },
@@ -130,6 +184,7 @@ export function startDashboard(root, { maps, create, signOut, email }) {
     h('h2', {}, 'あなたが編集できるマップ'),
     maps.length ? null : h('p', { class: 'desc' }, 'まだありません。管理者に招待してもらうか、新しく作ってください。'),
     ...maps.map((m) => h('a', { href: `?map=${m.id}&mode=edit` }, h('span', {}, h('b', {}, m.name), ' ', h('span', { class: 'muted' }, sizeLabel(boundsOf(m)))), icon('edit')))));
+  if (setPassword) inner.append(passwordCard(setPassword));
 }
 
 // ---------- マップの範囲 ----------
