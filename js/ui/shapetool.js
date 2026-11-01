@@ -9,6 +9,7 @@ import { ICONS, ICON_KEYS, iconSvg } from '../engine/icons.js';
 import { RAIL_TYPES, railColor } from '../engine/rails.js';
 import { fmtDist } from '../engine/view.js';
 import { DAY_NAMES, defaultHours } from '../hours.js';
+import { SNAP, setSnap, snapActive, gridPt, angleSnap, withPerp, drawGuide } from './snap.js';
 
 const HANDLE = 9;
 const round1 = (v) => Math.round(v * 10) / 10;
@@ -42,6 +43,56 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
   const patch = (id, fn) => { const f = structuredClone(F.get(id)); if (!f) return; fn(f); save(f); };
   const sel = () => (selId ? F.get(selId) : null);
   const scr = (x, z) => view.toScreen(x, z);
+
+  // ---------- スナップ ----------
+  let sguide = null, sguideAt = null;
+  /** 近くの道路・線路の向き（建物を道路に平行にそろえるため） */
+  function nearLineDir(w, px = 60) {
+    let best = null;
+    for (const r of F.items.values()) {
+      if (r.kind !== 'road' && r.kind !== 'rail' && r.kind !== 'river') continue;
+      const g = layer.geom.get(r);
+      if (g.bbox[0] > w[0] + px * view.mpp || g.bbox[2] < w[0] - px * view.mpp || g.bbox[1] > w[1] + px * view.mpp || g.bbox[3] < w[1] - px * view.mpp) continue;
+      for (const pts of g.segs) for (let k = 0; k < pts.length - 1; k++) {
+        const [ax, az] = pts[k], [bx, bz] = pts[k + 1];
+        const dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz; if (!L2) continue;
+        let t = ((w[0] - ax) * dx + (w[1] - az) * dz) / L2; t = Math.max(0, Math.min(1, t));
+        const d = Math.hypot(ax + dx * t - w[0], az + dz * t - w[1]);
+        if (d * view.scale <= px && (!best || d < best.d)) { const L = Math.sqrt(L2); best = { d, dir: [dx / L, dz / L] }; }
+      }
+    }
+    return best?.dir || null;
+  }
+  /**
+   * 点の位置を決める。pts = それまでに置いた点（多角形の作成中）
+   * 縦横・直前の辺に直角/まっすぐ・近くの道路に平行 にそろえ、そろわなければ1マスに吸着
+   */
+  function snapPt(w, pts = []) {
+    sguide = null; sguideAt = null;
+    if (!snapActive()) return w;
+    const O = pts[pts.length - 1];
+    if (O) {
+      const dirs = [...withPerp([1, 0], '縦横')];
+      const P = pts[pts.length - 2];
+      if (P) { const dx = O[0] - P[0], dz = O[1] - P[1], L = Math.hypot(dx, dz); if (L) dirs.push(...withPerp([dx / L, dz / L], '直進')); }
+      const nd = nearLineDir(w); if (nd) dirs.push(...withPerp(nd, '平行'));
+      const a = angleSnap(O, w, dirs, view.scale);
+      if (a) { sguide = a.guide; sguideAt = a.w; return alignTo(a.w, pts); }
+    }
+    return alignTo(gridPt(w), pts);
+  }
+  /** ほかの頂点（最初の点など）と縦か横の位置がほぼ同じなら、ぴったりそろえる（長方形を閉じやすく） */
+  function alignTo(q, pts) {
+    const tol = 8 / view.scale;
+    let [x, z] = q;
+    for (const pt of pts.slice(0, -1)) {
+      if (!pt) continue;
+      if (Math.abs(pt[0] - x) < tol) x = pt[0];
+      if (Math.abs(pt[1] - z) < tol) z = pt[1];
+    }
+    return [x, z];
+  }
+  const snapMove = (dx, dz) => (snapActive() ? [Math.round(dx), Math.round(dz)] : [dx, dz]);
 
   // ---------- 図形の頂点編集（建物・範囲・駅で共通） ----------
   /** 回転ハンドルの画面位置（図形の上側） */
@@ -92,11 +143,17 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
       layer.shapeOverride = new Map([[drag.id, c]]); drag.cur = c; view.requestDraw();
       return;
     }
-    if (drag.vertex !== undefined) c.poly[drag.vertex] = [round1(w[0]), round1(w[1])];
-    else if (drag.whole) {
-      if (c.poly) c.poly = c.poly.map(([x, z]) => [round1(x + dx), round1(z + dz)]);
-      if (c.exits) c.exits = c.exits.map((e) => ({ ...e, x: round1(e.x + dx), z: round1(e.z + dz) }));
-      if (c.x !== undefined) { c.x = round1(c.x + dx); c.z = round1(c.z + dz); }
+    if (drag.vertex !== undefined) {
+      // 隣の頂点に対して縦横・直角にそろえる
+      const n = c.poly.length, prev = c.poly[(drag.vertex - 1 + n) % n], prev2 = c.poly[(drag.vertex - 2 + n) % n];
+      const q = snapPt(w, [prev2, prev]);
+      c.poly[drag.vertex] = [round1(q[0]), round1(q[1])];
+    } else if (drag.whole) {
+      // 全体の移動は1マス単位（形はそのまま）
+      const [mx, mz] = snapMove(dx, dz);
+      if (c.poly) c.poly = c.poly.map(([x, z]) => [round1(x + mx), round1(z + mz)]);
+      if (c.exits) c.exits = c.exits.map((e) => ({ ...e, x: round1(e.x + mx), z: round1(e.z + mz) }));
+      if (c.x !== undefined) { const q = snapActive() ? gridPt([c.x + dx, c.z + dz]) : [c.x + dx, c.z + dz]; c.x = round1(q[0]); c.z = round1(q[1]); }
     }
     drag.moved = drag.moved || Math.hypot(dx, dz) * view.scale > 3;
     layer.shapeOverride = new Map([[drag.id, c]]);
@@ -104,7 +161,7 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
     view.requestDraw();
   }
   function endDrag() {
-    const d = drag; drag = null; layer.shapeOverride = null;
+    const d = drag; drag = null; layer.shapeOverride = null; sguide = null;
     if (d.moved || d.inserted) save(d.cur || d.orig);
     else view.requestDraw();
   }
@@ -191,7 +248,7 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
         let cur = cursor;
         if (f?.poly) { const hnd = polyHandleAt(f, p); if (hnd) cur = hnd.vertex !== undefined ? 'grab' : 'copy'; else if (inPoly(f.poly, w[0], w[1])) cur = 'move'; }
         view.canvas.style.cursor = exitMode ? 'crosshair' : cur;
-        if (make?.hover) { make.cursor = w; syncDraft(); }
+        if (make?.hover) { make.cursor = snapPt(w, make.pts); syncDraft(); }
       },
       activate() { tool = kind; },
       deactivate() { make = null; layer.shapeDraft = null; drag = null; layer.shapeOverride = null; exitMode = false; select(null); },
@@ -224,12 +281,13 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
 
   // 多角形（クリックで頂点を置く）作成
   function polyClick(kind, ftype, w, p, finish) {
-    if (!make) { make = { type: 'poly', kind, ftype, pts: [[round1(w[0]), round1(w[1])]], hover: true, cursor: w, finish }; refreshPanel(); syncDraft(); return; }
+    if (!make) { const q = snapPt(w); make = { type: 'poly', kind, ftype, pts: [[round1(q[0]), round1(q[1])]], hover: true, cursor: q, finish }; refreshPanel(); syncDraft(); return; }
     const [fx, fy] = scr(...make.pts[0]);
     if (make.pts.length >= 3 && Math.hypot(fx - p[0], fy - p[1]) < 12) return finishPoly();
     const last = make.pts[make.pts.length - 1]; const [lx, ly] = scr(...last);
     if (Math.hypot(lx - p[0], ly - p[1]) < 6) return finishPoly();
-    make.pts.push([round1(w[0]), round1(w[1])]); syncDraft();
+    const q = snapPt(w, make.pts);
+    make.pts.push([round1(q[0]), round1(q[1])]); sguide = null; syncDraft();
   }
   function finishPoly() {
     if (!make || make.type !== 'poly') return;
@@ -263,9 +321,9 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
       if (hit) { select(hit.id); return; }
       if (selId) { select(null); return; }
       if (bst.mode === 'poly') { press = panOrClick(p, (w2, p2) => polyClick('building', bst.type, w2, p2, createBuilding)); return; }
-      make = { type: bst.mode, kind: 'building', ftype: bst.type, a: w, b: null };
+      make = { type: bst.mode, kind: 'building', ftype: bst.type, a: snapPt(w), b: null };
     },
-    onMove(w, e, p) { if (press) return pressMove(p); if (make && make.type !== 'poly') { make.b = w; syncDraft(); } },
+    onMove(w, e, p) { if (press) return pressMove(p); if (make && make.type !== 'poly') { make.b = snapPt(w); syncDraft(); } },
     onUp(w, e, p) {
       if (press) return pressUp(w, p);
       if (!make || make.type === 'poly') return;
@@ -334,16 +392,16 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
       if (hit) { select(hit.id); return; }
       if (selId) { select(null); return; }
       const snap = nearestRailPoint(w);
-      make = { type: 'strip', kind: 'station', a: snap ? [snap.x, snap.z] : w, b: null, rails: snap ? [snap.rail.id] : [] };
+      make = { type: 'strip', kind: 'station', a: snap ? [snap.x, snap.z] : snapPt(w), b: null, rails: snap ? [snap.rail.id] : [] };
     },
     onMove(w) {
       if (make?.type !== 'strip') return;
       const snap = nearestRailPoint(w);
-      make.b = snap ? [snap.x, snap.z] : w; syncDraft();
+      make.b = snap ? [snap.x, snap.z] : snapPt(w, [make.a]); syncDraft();
     },
     onUp() {
       if (make?.type !== 'strip') return;
-      const m = make; make = null; layer.shapeDraft = null;
+      const m = make; make = null; layer.shapeDraft = null; sguide = null;
       if (!m.b || Math.hypot(m.b[0] - m.a[0], m.b[1] - m.a[1]) < 8) { view.requestDraw(); if (!m.b) toast('線路に沿ってドラッグすると駅ができます'); return; }
       const poly = stripPoly(m.a, m.b, sst.width);
       // 線路が重なっていても自動で乗換駅にはしない：ドラッグを始めた線路（なければ通っている線路のうち一番近いもの）だけ
@@ -365,7 +423,8 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
       if (hit) { select(hit.id); drag = { id: hit.id, whole: true, w0: w, orig: structuredClone(F.get(hit.id)) }; return; }
       press = panOrClick(p, (w2) => {
         if (selId) { select(null); return; }
-        const f = { id: newId(), kind: 'poi', icon: pst.icon, name: '', desc: '', info: '', address: '', phone: '', x: round1(w2[0]), z: round1(w2[1]) };
+        const q = snapActive() ? gridPt(w2) : w2;
+        const f = { id: newId(), kind: 'poi', icon: pst.icon, name: '', desc: '', info: '', address: '', phone: '', x: round1(q[0]), z: round1(q[1]) };
         commit([{ id: f.id, after: f }]); select(f.id);
         setTimeout(() => document.getElementById('poi-name')?.focus(), 30);
       });
@@ -429,6 +488,7 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
           ctx.font = '700 12px system-ui'; ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.strokeText(t, rx + 14, ry + 4); ctx.fillStyle = '#1f7c6f'; ctx.fillText(t, rx + 14, ry + 4);
         }
       }
+      if (sguide && (make || drag)) drawGuide(ctx, v, sguide, sguideAt);
       if (make?.type === 'poly' && make.pts.length) {
         const [x, y] = v.toScreen(...make.pts[0]);
         ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.strokeStyle = '#1f7c6f'; ctx.lineWidth = 2; ctx.stroke();
@@ -620,6 +680,12 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
   }
   function renderPanel(box, which) {
     ({ building: buildingPanel, area: areaPanel, station: stationPanel, poi: poiPanel, airport: airportPanel })[which](box);
+    if (which === 'building' || which === 'station' || which === 'poi' || (which === 'area' && ast.mode === 'poly')) box.append(snapRow());
+  }
+  function snapRow() {
+    return h('div', { class: 'row', style: { marginTop: '12px' } },
+      h('label', { class: 'check', style: { margin: 0 } }, h('input', { type: 'checkbox', checked: SNAP.on, onchange: (e) => { setSnap(e.target.checked); view.requestDraw(); } }), 'スナップ'),
+      h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '2px' } }, '角を縦横・直角・近くの道路と平行にそろえ、1マス（1m）に吸着します。移動も1マス単位。Alt キーを押している間は一時的に切り替わります。'));
   }
   function validate() {
     if (selId && !F.get(selId)) { selId = null; layer.selected = null; return true; }
@@ -654,7 +720,31 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
     if (f.x !== undefined) { const [x, y] = scr(f.x, f.z); return Math.hypot(x - p[0], y - p[1]) < 14; }
     return false;
   }
+  // ---------- コピー・貼り付け（建物・範囲・施設） ----------
+  let clip = null;
+  function copySel() {
+    const f = sel();
+    if (!f || !['building', 'area', 'poi'].includes(f.kind)) return false;
+    clip = structuredClone(f);
+    return true;
+  }
+  /** カーソルの位置 w に貼り付ける（形の中心がカーソルに来る） */
+  function paste(w) {
+    if (!clip) return null;
+    const f = structuredClone(clip);
+    f.id = newId();
+    const c = f.poly ? centroid(f.poly) : [f.x, f.z];
+    let d = w ? [w[0] - c[0], w[1] - c[1]] : [10, 10];
+    if (snapActive()) d = [Math.round(d[0]), Math.round(d[1])];
+    if (f.poly) f.poly = f.poly.map(([x, z]) => [round1(x + d[0]), round1(z + d[1])]);
+    if (f.x !== undefined) { f.x = round1(f.x + d[0]); f.z = round1(f.z + d[1]); }
+    commit([{ id: f.id, after: f }]);
+    select(f.id);
+    return f.kind;
+  }
+
   return {
+    copy: copySel, paste, clipKind: () => clip?.kind || null,
     tools: { building, area, station, poi, airport }, overlay, renderPanel, validate,
     isBusy: () => !!make || roadTools.isBusy(),
     hitAt, handleAt, selectShape: (id) => select(id), clear: () => { if (selId) select(null); }, selectedKind: () => sel()?.kind || null,

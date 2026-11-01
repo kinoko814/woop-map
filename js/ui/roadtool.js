@@ -12,12 +12,9 @@ import { RAIL_TYPES, METRO_COLORS, railVisible, railColor } from '../engine/rail
 import { riverVisible } from '../engine/rivers.js';
 import { ADDR_LEVELS, levelIndex } from '../engine/address.js';
 import { imageToDataURL } from './dom.js';
+import { SNAP, setSnap } from './snap.js';
 
 const SNAP_PX = 11;
-// スナップ（道路・鉄道ツールで共通。オン/オフは覚えておく）
-const SNAP = { on: true, alt: false };
-try { SNAP.on = localStorage.getItem('woop-snap') !== '0'; } catch (e) { /* 保存できない環境 */ }
-const setSnap = (on) => { SNAP.on = on; try { localStorage.setItem('woop-snap', on ? '1' : '0'); } catch (e) { /* 無視 */ } };
 
 export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 'road' }) {
   const isRail = kind === 'rail';
@@ -37,7 +34,7 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
   let hoverSnap = null;
   let fromEdit = false;   // 選択ツールの「延ばす・分岐」から描いているか
   let guide = null;       // スナップの補助線 {o:[x,z], d:[dx,dz], label}
-  const snapOn = () => (kind === 'road' || isRail) && SNAP.on !== SNAP.alt;   // Alt を押している間は反転
+  const snapOn = () => (kind === 'road' || isRail || isRiver) && SNAP.on !== SNAP.alt;   // Alt を押している間は反転
   const grid = (v) => Math.round(v);   // 1マス（1m）に吸着
 
   // ---------- 当たり判定 ----------
@@ -416,17 +413,27 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
     else sel = { roadId: hit.line.id, seg: hit.seg, nodeId: null };
     refreshPanel(); view.requestDraw();
   }
+  /** 延ばす・分岐するときは、元の線と同じ太さで描き始める */
+  function matchWidth(r, i) {
+    const sg = r.segs[i] || r.segs[i - 1];
+    const w = sg?.w;
+    if (!w) return;
+    if (isRiver) rvst.w = w; else if (kind === 'road') st.w = w;
+  }
   function extendFrom(roadId, nodeId) {
     fromEdit = true;
     const r = F.get(roadId);
     const i = r.nodes.indexOf(nodeId);
+    matchWidth(r, i === r.nodes.length - 1 ? i - 1 : i);
     if (i === r.nodes.length - 1) startDraw(null, null, { roadId, atEnd: true });
     else if (i === 0) startDraw(null, null, { roadId, atEnd: false });
     else branchFrom(nodeId);
   }
-  function branchFrom(nodeId) {
+  function branchFrom(nodeId, roadId = sel?.roadId) {
     fromEdit = true;
     const n = F.get(nodeId);
+    const r = F.get(roadId || [...F.linesOf(nodeId)].find((id) => F.get(id)?.kind === kind));
+    if (r) { const i = r.nodes.indexOf(nodeId); matchWidth(r, i >= r.segs.length ? i - 1 : i); }
     startDraw({ node: n }, [n.x, n.z]);
   }
   /** 交差点の接続を切る（立体交差にするときなど） */
@@ -785,6 +792,7 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
       widthRow(rvst.w, (wv) => { rvst.w = wv; syncDraft(); }, false, 500),
       h('div', { class: 'row' }, h('label', { class: 'lbl' }, '線の引き方（C キーで切り替え）'),
         seg2([['直線', false], ['曲線', true]], st.curve, (c) => { st.curve = c; syncDraft(); refreshPanel(); })),
+      snapRow(),
     ];
     if (draw) {
       parts.push(h('div', { class: 'hint' }, h('b', {}, '川を描いています'), h('div', {}, 'クリックで中間点を追加。太さは途中で変えられます（河口に向かって太くするなど）。'), h('div', {}, '完了：Enter・最後の点をもう一度クリック　1つ戻す：Backspace')),

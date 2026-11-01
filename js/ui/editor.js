@@ -45,6 +45,24 @@ export async function startEditor(root, store, nav) {
   const body = h('div', { class: 'ed-body' }, wrap);
   root.replaceChildren(top, body);
 
+  // 画像ファイルを地図にドラッグ＆ドロップすると、その場所に画像レイヤーとして追加
+  const dropHint = h('div', { class: 'drop-hint', hidden: true }, h('div', {}, '画像をここにドロップすると、画像レイヤーとして追加します'));
+  wrap.append(dropHint);
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  let dragDepth = 0;
+  wrap.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; dropHint.hidden = false; });
+  wrap.addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  wrap.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dropHint.hidden = true; });
+  wrap.addEventListener('drop', async (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); dragDepth = 0; dropHint.hidden = true;
+    const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return toast('画像ファイル（PNG・JPG など）をドロップしてください');
+    const r = canvas.getBoundingClientRect();
+    let at = view.toWorld(e.clientX - r.left, e.clientY - r.top);
+    for (const f of files) { await uploadImage(f, at); at = [at[0] + 40, at[1] + 40]; }
+  });
+
   const view = new MapView(canvas, terrain);
   const overlays = new OverlayLayer(view);
   view.layers.push(overlays);
@@ -144,6 +162,7 @@ export async function startEditor(root, store, nav) {
 
   // ---------- 状態 ----------
   const st = { tool: 'hand', v: T.LAND, width: 20, penMode: 'free' };   // penMode: free=自由線 / line=直線
+  let pointerW = null;   // 最後にマウスがあった地図上の位置（貼り付け・ドロップ用）
   const others = new Map();     // 他の編集者のカーソル
 
   session.onStatus = (s, msg) => {
@@ -488,18 +507,21 @@ export async function startEditor(root, store, nav) {
     opts.replaceChildren(...parts);
   }
 
-  async function uploadImage(f) {
+  /** 画像レイヤーを追加。at を渡すとその地点を中心に置く（ドラッグ＆ドロップ） */
+  async function uploadImage(f, at = null) {
     toast('画像を読み込み中…', 0);
     try {
       const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(f); });
       const w = img.naturalWidth, ar = img.naturalHeight / img.naturalWidth;
+      const c = at || [view.x, view.z];
       const meta = {
-        name: f.name, x: Math.round(view.x - w / 2), z: Math.round(view.z - (w * ar) / 2), w, ar,
+        name: f.name, x: Math.round(c[0] - w / 2), z: Math.round(c[1] - (w * ar) / 2), w, ar,
         opacity: 0.5, visible: true, ord: (overlays.items.at(-1)?.ord ?? 0) + 1,
       };
       const row = await store.addOverlay(f, meta);
       overlays.set([...overlays.items, row]);
       overlays.selectedId = row.id;
+      if (st.tool !== 'image') setTool('image');
       renderOpts();
       view.setView(meta.x + w / 2, meta.z + (w * ar) / 2, Math.min(view.w / w, view.h / (w * ar)) * 0.85);
       hideToast();
@@ -532,6 +554,16 @@ export async function startEditor(root, store, nav) {
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveNow(); return; }
     const tag = e.target.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    // 建物・範囲・施設のコピーと貼り付け
+    if (mod && e.key.toLowerCase() === 'c' && shapes.copy()) { e.preventDefault(); toast('コピーしました。Ctrl+V でカーソルの位置に貼り付けます'); return; }
+    if (mod && e.key.toLowerCase() === 'v' && shapes.clipKind()) {
+      e.preventDefault();
+      const k = shapes.clipKind();
+      if (st.tool !== k && st.tool !== 'select') setTool(k);
+      shapes.paste(pointerW);
+      renderOpts();
+      return;
+    }
     if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
     if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
     if (mod) return;
@@ -583,6 +615,7 @@ export async function startEditor(root, store, nav) {
     onPeople: (list) => renderPeople(list),
   });
   let lastSend = 0;
+  { const pp = view.onPointerWorld; view.onPointerWorld = (w) => { pp(w); pointerW = w; }; }
   const prevPW = view.onPointerWorld;
   view.onPointerWorld = (w) => {
     prevPW(w);
