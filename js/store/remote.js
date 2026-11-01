@@ -187,9 +187,21 @@ export class RemoteStore {
 
   // ---- 画像レイヤー ----
   async listOverlays() {
-    const { data, error } = await this.sb.from('overlays').select('*').eq('map_id', this.mapId).order('ord');
-    if (error) throw error;
-    return Promise.all(data.map((r) => this._withUrl(r)));
+    // 1回で取れるのは1000件までなので、何千枚あっても全部読むよう分けて取る
+    const rows = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await this.sb.from('overlays').select('*').eq('map_id', this.mapId).order('ord').order('id').range(from, from + 999);
+      if (error) throw error;
+      rows.push(...data);
+      if (data.length < 1000) break;
+    }
+    // 表示用のURLもまとめて発行（1枚ずつだと枚数が多いとき遅い）
+    const need = [...new Set(rows.map((r) => r.path).filter((p) => !this.urlCache.has(p)))];
+    for (let i = 0; i < need.length; i += 200) {
+      const { data } = await this.sb.storage.from('overlays').createSignedUrls(need.slice(i, i + 200), 60 * 60 * 24);
+      for (const d of data || []) if (d.signedUrl) this.urlCache.set(d.path, d.signedUrl);
+    }
+    return rows.map((r) => ({ ...r, url: this.urlCache.get(r.path) }));
   }
   async _withUrl(r) {
     if (!this.urlCache.has(r.path)) {

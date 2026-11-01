@@ -329,6 +329,14 @@ export async function startEditor(root, store, nav) {
   view.layers.push({
     draw(ctx, v) {
       ctx.save();
+      // 縮小していて画像を隠しているときの案内
+      if (overlays.zoomHidden > 0 && st.tool === 'image') {
+        const t = `拡大すると画像が表示されます（この範囲に ${overlays.zoomHidden.toLocaleString('ja-JP')} 枚）`;
+        ctx.font = '600 12px system-ui'; const tw = ctx.measureText(t).width;
+        const x = v.w / 2 - tw / 2 - 10, y = v.h - 44;
+        ctx.fillStyle = 'rgba(30,35,41,.78)'; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, tw + 20, 26, 13) : ctx.rect(x, y, tw + 20, 26); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'; ctx.fillText(t, x + 10, y + 13.5); ctx.textBaseline = 'alphabetic';
+      }
       const prevPts = penPts || (linePts ? (hoverW ? [...linePts, hoverW] : linePts) : null);
       if (prevPts) {
         const penPts = prevPts;
@@ -464,14 +472,14 @@ export async function startEditor(root, store, nav) {
     if (!items.length) list.append(h('div', { class: 'muted' }, 'まだ画像がありません。マイクラのマップMODで書き出した画像をアップロードしてください。'));
     for (const it of items) {
       list.append(h('div', { class: `layer ${overlays.selectedId === it.id ? 'on' : ''}`, onclick: () => { overlays.selectedId = it.id; renderOpts(); view.requestDraw(); } },
-        h('img', { src: it.url, alt: '' }),
+        h('img', { src: it.url, alt: '', loading: 'lazy' }),
         h('span', { class: 'nm' }, it.name || '画像'),
         h('button', { class: 'icon-btn', title: it.visible ? '非表示にする' : '表示する', onclick: (e) => { e.stopPropagation(); it.visible = !it.visible; saveOverlay(it, { visible: it.visible }); renderOpts(); view.requestDraw(); } }, icon(it.visible ? 'eye' : 'eyeoff')),
       ));
     }
     const parts = [h('h3', {}, '画像レイヤー'),
       h('button', { class: 'btn primary', style: { width: '100%', justifyContent: 'center' }, onclick: () => file.click() }, icon('upload'), '画像をアップロード'), file,
-      h('div', { class: 'muted', style: { marginTop: '6px' } }, '画像は編集モードでだけ表示され、表示モードには出ません。縦横比は固定です。'),
+      h('div', { class: 'muted', style: { marginTop: '6px' } }, `画像は編集モードでだけ表示され、表示モードには出ません。縦横比は固定です。軽くするため、遠くから見ているときは表示せず、画面に画像が20枚くらい入るまで拡大すると表示します。${overlays.items.length ? `（全部で ${overlays.items.length.toLocaleString('ja-JP')} 枚）` : ''}`),
       h('div', { class: 'hint', style: { marginTop: '8px' } },
         h('div', {}, h('b', {}, 'JourneyMap のタイル画像'), 'は、ファイル名（例：0,0.png・-1,0.png）から自動で正しい座標に置きます。まとめて選ぶか、地図にドラッグ＆ドロップしてください。'),
         h('div', {}, '同じタイルをもう一度アップロードすると、新しい画像に置き換わります。')),
@@ -498,7 +506,7 @@ export async function startEditor(root, store, nav) {
           h('div', {}, h('label', {}, '幅 (m)'), fw), h('div', {}, h('label', {}, '高さ (m)'), h('input', { type: 'text', disabled: true, value: fmt(s.w * s.ar) }))),
         h('div', { class: 'row' }, h('label', { class: 'lbl' }, '透明度 ', opl), op),
         h('div', { class: 'btn-row' },
-          h('button', { class: 'btn', title: '画像の1ピクセルを1ブロック(1m)にする', onclick: () => { s.w = s.img.naturalWidth; syncFields(); view.requestDraw(); saveOverlay(s, { w: s.w }); } }, '1px = 1ブロック'),
+          h('button', { class: 'btn', title: '画像の1ピクセルを1ブロック(1m)にする', onclick: () => { if (!s.img?.naturalWidth) return toast('拡大して画像を表示してから押してください'); s.w = s.img.naturalWidth; syncFields(); view.requestDraw(); saveOverlay(s, { w: s.w }); } }, '1px = 1ブロック'),
           h('button', { class: 'btn', onclick: () => { view.setView(s.x + s.w / 2, s.z + (s.w * s.ar) / 2, Math.min(view.w / s.w, view.h / (s.w * s.ar)) * 0.9); } }, 'ここへ移動'),
           h('button', { class: 'btn', disabled: idx >= overlays.items.length - 1, onclick: () => reorder(s, 1) }, icon('up'), '前面'),
           h('button', { class: 'btn', disabled: idx <= 0, onclick: () => reorder(s, -1) }, icon('down'), '背面'),
@@ -529,6 +537,8 @@ export async function startEditor(root, store, nav) {
     if (!files.length) return;
     const placed = [];
     let tiles = 0, replaced = 0, failed = 0;
+    let pending = [];   // まだ地図に反映していない分（何百枚でも重くならないよう、まとめて反映）
+    const flush = () => { if (pending.length) { overlays.set([...overlays.items, ...pending]); pending = []; } };
     let c = at || [view.x, view.z];
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
@@ -543,20 +553,28 @@ export async function startEditor(root, store, nav) {
         if (tile) {
           // タイル：左上が (X×512, Z×512)、幅 512m（画像の解像度に関係なく 1タイル = 512 ブロック）
           meta = { name: `${tile.tx},${tile.tz}`, x: tile.tx * TILE, z: tile.tz * TILE, w: TILE, ar };
-          const old = overlays.items.find((o) => parseTile(o.name)?.tx === tile.tx && parseTile(o.name)?.tz === tile.tz);
-          if (old) { await store.deleteOverlay(old.id); overlays.set(overlays.items.filter((o) => o.id !== old.id)); replaced++; }
+          const same = (o) => { const t = parseTile(o.name); return t?.tx === tile.tx && t?.tz === tile.tz; };
+          const old = overlays.items.find(same) || pending.find(same);
+          if (old) {
+            await store.deleteOverlay(old.id);
+            pending = pending.filter((o) => o.id !== old.id);
+            if (overlays.items.includes(old)) overlays.set(overlays.items.filter((o) => o.id !== old.id));
+            replaced++;
+          }
           tiles++;
         } else {
           const w = img.naturalWidth;
           meta = { name: f.name, x: Math.round(c[0] - w / 2), z: Math.round(c[1] - (w * ar) / 2), w, ar };
           c = [c[0] + 40, c[1] + 40];
         }
-        Object.assign(meta, { opacity: 0.5, visible: true, ord: (overlays.items.at(-1)?.ord ?? 0) + 1 });
+        Object.assign(meta, { opacity: 0.5, visible: true, ord: ((pending.at(-1) || overlays.items.at(-1))?.ord ?? 0) + 1 });
         const row = await store.addOverlay(f, meta);
-        overlays.set([...overlays.items, row]);
+        pending.push(row);
         placed.push(row);
+        if (pending.length >= 25) flush();
       } catch (e) { console.error(e); failed++; }
     }
+    flush();
     hideToast();
     if (!placed.length) { toast('画像のアップロードに失敗しました'); return; }
     overlays.selectedId = placed[placed.length - 1].id;
@@ -565,7 +583,10 @@ export async function startEditor(root, store, nav) {
     // 追加した画像がすべて見えるように
     const x0 = Math.min(...placed.map((o) => o.x)), z0 = Math.min(...placed.map((o) => o.z));
     const x1 = Math.max(...placed.map((o) => o.x + o.w)), z1 = Math.max(...placed.map((o) => o.z + o.w * o.ar));
-    view.setView((x0 + x1) / 2, (z0 + z1) / 2, Math.min(view.w / (x1 - x0), view.h / (z1 - z0)) * 0.85);
+    // ただし画像は拡大しないと表示されないので、表示される縮尺までは寄せる
+    const last = placed[placed.length - 1];
+    const minScale = Math.sqrt((view.w * view.h) / (18 * last.w * last.w * last.ar));
+    view.setView((x0 + x1) / 2, (z0 + z1) / 2, Math.max(Math.min(view.w / (x1 - x0), view.h / (z1 - z0)) * 0.85, minScale));
     const msg = [];
     if (tiles) msg.push(`JourneyMap のタイル ${tiles} 枚を座標どおりに配置しました${replaced ? `（${replaced} 枚は置き換え）` : ''}`);
     if (placed.length - tiles > 0) msg.push(`画像 ${placed.length - tiles} 枚を配置しました（1px = 1ブロック）。位置は数値かドラッグで合わせてください`);
