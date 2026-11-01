@@ -143,7 +143,7 @@ export async function startEditor(root, store, nav) {
   features.onChange = () => { view.requestDraw(); if (validateAll()) renderOpts(); };
 
   // ---------- 状態 ----------
-  const st = { tool: 'hand', v: T.LAND, width: 20 };
+  const st = { tool: 'hand', v: T.LAND, width: 20, penMode: 'free' };   // penMode: free=自由線 / line=直線
   const others = new Map();     // 他の編集者のカーソル
 
   session.onStatus = (s, msg) => {
@@ -166,26 +166,52 @@ export async function startEditor(root, store, nav) {
 
   // ---------- ツール ----------
   let penPts = null, hoverW = null;
+  let linePts = null;   // 直線モードで置いた角の点
   const tools = {
     hand: { pan: true, cursor: 'grab' },
     pen: {
       cursor: 'crosshair',
-      down(w) { penPts = [round(w)]; view.requestDraw(); },
-      move(w) {
+      down(w, e, p) {
+        if (st.penMode === 'line') { linePress = p; return; }
+        penPts = [round(w)]; view.requestDraw();
+      },
+      move(w, e, p) {
+        if (st.penMode === 'line') { hoverW = lineSnap(w, e); view.requestDraw(); return; }
         const last = penPts[penPts.length - 1];
         const minD = Math.max(st.width * 0.15, view.mpp * 2, 0.5);
         if (Math.hypot(w[0] - last[0], w[1] - last[1]) >= minD) { penPts.push(round(w)); view.requestDraw(); }
         hoverW = w;
       },
-      up(w) {
+      up(w, e, p) {
+        if (st.penMode === 'line') {
+          const pr = linePress; linePress = null;
+          if (!pr || Math.hypot(p[0] - pr[0], p[1] - pr[1]) > 5) return;
+          const q = lineSnap(w, e);
+          const lastP = linePts?.[linePts.length - 1];
+          if (lastP) {
+            const [lx, ly] = view.toScreen(...lastP);
+            // 最後の点をもう一度クリックで完了
+            if (Math.hypot(lx - p[0], ly - p[1]) < 10) { finishLine(); return; }
+          }
+          linePts = linePts ? [...linePts, q] : [q];
+          renderOpts(); view.requestDraw();
+          return;
+        }
         const last = penPts[penPts.length - 1];
         if (w[0] !== last[0] || w[1] !== last[1]) penPts.push(round(w));
         const op = { t: 'stroke', pts: penPts, w: st.width, v: st.v };
         session.doOp(op).finally(() => { penPts = null; view.requestDraw(); });
       },
       cancel() { penPts = null; view.requestDraw(); },
-      hover(w) { hoverW = w; view.requestDraw(); },
-      deactivate() { hoverW = null; },
+      hover(w, e) { hoverW = st.penMode === 'line' ? lineSnap(w, e) : w; view.requestDraw(); },
+      key(e) {
+        if (st.penMode !== 'line' || !linePts) return false;
+        if (e.key === 'Enter') { finishLine(); return true; }
+        if (e.key === 'Escape') { linePts = null; renderOpts(); view.requestDraw(); return true; }
+        if (e.key === 'Backspace') { linePts = linePts.length > 1 ? linePts.slice(0, -1) : null; renderOpts(); view.requestDraw(); return true; }
+        return false;
+      },
+      deactivate() { hoverW = null; finishLine(); },
     },
     fill: {
       cursor: 'cell',
@@ -208,6 +234,25 @@ export async function startEditor(root, store, nav) {
     area: shapes.tools.area,
     poi: shapes.tools.poi,
   };
+  // ---------- ペンの直線モード ----------
+  let linePress = null;
+  /** 1マスに吸着。Shift を押している間は 45 度刻みにそろえる */
+  function lineSnap(w, e) {
+    let q = [Math.round(w[0]), Math.round(w[1])];
+    const last = linePts?.[linePts.length - 1];
+    if (last && e?.shiftKey) {
+      const dx = w[0] - last[0], dz = w[1] - last[1], L = Math.hypot(dx, dz);
+      const a = Math.round(Math.atan2(dz, dx) / (Math.PI / 4)) * (Math.PI / 4);
+      q = [Math.round(last[0] + Math.cos(a) * L), Math.round(last[1] + Math.sin(a) * L)];
+    }
+    return q;
+  }
+  function finishLine() {
+    const pts = linePts; linePts = null;
+    if (pts?.length) session.doOp({ t: 'stroke', pts: pts.length === 1 ? [pts[0], pts[0]] : pts, w: st.width, v: st.v }).finally(() => view.requestDraw());
+    if (st.tool === 'pen') renderOpts();
+    view.requestDraw();
+  }
   function imageTool() {
     let drag = null;
     return {
@@ -266,8 +311,10 @@ export async function startEditor(root, store, nav) {
   view.layers.push({
     draw(ctx, v) {
       ctx.save();
-      if (penPts) {
-        ctx.strokeStyle = T_COLORS[st.v]; ctx.globalAlpha = 0.85;
+      const prevPts = penPts || (linePts ? (hoverW ? [...linePts, hoverW] : linePts) : null);
+      if (prevPts) {
+        const penPts = prevPts;
+        ctx.strokeStyle = st.v === T.NONE ? 'rgba(233,235,238,.9)' : T_COLORS[st.v]; ctx.globalAlpha = 0.85;
         ctx.lineCap = ctx.lineJoin = 'round';
         ctx.lineWidth = Math.max(1, st.width * v.scale);
         ctx.beginPath();
@@ -357,6 +404,14 @@ export async function startEditor(root, store, nav) {
           v === T.NONE ? '消しゴム' : T_NAMES[v])));
       const parts = [h('h3', {}, st.tool === 'pen' ? 'ペン' : '塗りつぶし'), h('label', { class: 'lbl' }, '種類'), chips];
       if (st.tool === 'pen') {
+        parts.push(h('div', { class: 'row' }, h('label', { class: 'lbl' }, '描き方'),
+          h('div', { class: 'seg' }, ...[['自由線', 'free'], ['直線', 'line']].map(([l, m]) => h('button', { class: st.penMode === m ? 'on' : '', onclick: () => { if (m !== st.penMode) { finishLine(); st.penMode = m; renderOpts(); view.requestDraw(); } } }, l)))));
+        if (st.penMode === 'line') parts.push(h('div', { class: 'hint' },
+          h('div', {}, 'クリックで角を置きながら、まっすぐな線で塗ります（海岸線などに）。点は1マスに吸着し、Shift を押すと45度刻みにそろいます。'),
+          h('div', {}, '完了：Enter・最後の点をもう一度クリック　1つ戻す：Backspace　やめる：Esc'),
+          linePts ? h('div', { class: 'btn-row', style: { marginTop: '8px' } },
+            h('button', { class: 'btn primary', onclick: finishLine }, icon('check'), `完了（${linePts.length}点）`),
+            h('button', { class: 'btn', onclick: () => { linePts = null; renderOpts(); view.requestDraw(); } }, icon('x'), 'やめる')) : null));
         const num = h('input', { type: 'number', min: 1, max: MAX_W, value: st.width });
         const rng = h('input', { type: 'range', min: 0, max: 1000, value: sliderFromW(st.width) });
         const setW = (w) => { st.width = Math.max(1, Math.min(MAX_W, Math.round(w))); num.value = st.width; rng.value = sliderFromW(st.width); view.requestDraw(); };

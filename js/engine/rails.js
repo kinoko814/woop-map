@@ -22,7 +22,7 @@ export const railColor = (rail) => (rail.type === 'metro' ? rail.color || METRO_
 /** 線路の描画用の太さ（px）。拡大するほど少し太く */
 function widthPx(mpp) { return mpp > 30 ? 2.2 : mpp > 8 ? 3 : mpp > 2 ? 4.2 : 5.5; }
 
-export function drawRails(ctx, v, items, getNode) {
+export function drawRails(ctx, v, items, getNode, opts = {}) {
   const mpp = v.mpp, W = widthPx(mpp);
   ctx.save();
   ctx.lineJoin = 'round';
@@ -39,7 +39,9 @@ export function drawRails(ctx, v, items, getNode) {
       });
       for (const run of runs) {
         if (run.lv !== lv) continue;
-        ctx.globalAlpha = lv === -1 ? 0.55 : 1;
+        // 表示モードでは、地下に入った都市鉄道（地下鉄）も破線にせず、そのままの実線で描く
+        const solidMetro = opts.metroSolid && r.type === 'metro';
+        ctx.globalAlpha = lv === -1 && !solidMetro ? 0.55 : 1;
         if (lv === 1 && W > 3) { ctx.strokeStyle = 'rgba(25,35,45,.14)'; ctx.lineWidth = W + 5; ctx.lineCap = 'round'; linePath(ctx, v, run.pts); ctx.stroke(); }
         if (r.type === 'jr') {
           ctx.lineCap = 'butt';
@@ -51,7 +53,7 @@ export function drawRails(ctx, v, items, getNode) {
           if (mpp < 12) ties(ctx, v, run.pts, W * 1.1, Math.max(6, W * 2));
         } else {
           ctx.lineCap = 'round';
-          if (lv === -1) ctx.setLineDash([W * 2, W * 1.2]);
+          if (lv === -1 && !solidMetro) ctx.setLineDash([W * 2, W * 1.2]);
           ctx.strokeStyle = railColor(r); ctx.lineWidth = W; linePath(ctx, v, run.pts); ctx.stroke();
           ctx.setLineDash([]);
         }

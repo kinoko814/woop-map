@@ -17,27 +17,135 @@ export const MODES = {
 const isHighway = (r) => !!ROAD_TYPES[r.type]?.highway || r.color === 'orange';
 const isAir = (r) => !!ROAD_TYPES[r.type]?.air;
 
-/** 道路網のグラフ。edges: Map(nodeId -> [{to, len, road, seg, fwd}]) */
+/**
+ * 道路網のグラフ。edges: Map(nodeId -> [{to, len, cost, road, seg, fwd, pts}])
+ *   交差点（共有の中間点）がなくても、同じ高さ（地上・高架・地下）の道路どうしが
+ *   交わっている所・道路の端が別の道路に触れている所は、通り抜けられるようにつなぐ
+ */
+const GRAPHS = new WeakMap();
 export function buildGraph(F, mode, { highway = true } = {}) {
-  const adj = new Map();
-  const add = (a, e) => { if (!adj.has(a)) adj.set(a, []); adj.get(a).push(e); };
+  const kv = F.kindVer || {};
+  const ver = `${kv.road || 0}|${kv.node || 0}`;
+  let cache = GRAPHS.get(F);
+  if (!cache || cache.ver !== ver) { cache = { ver, m: new Map() }; GRAPHS.set(F, cache); }
+  const key = `${mode}|${highway ? 1 : 0}`;
+  if (!cache.m.has(key)) cache.m.set(key, makeGraph(F, mode, highway));
+  return cache.m.get(key);
+}
+function makeGraph(F, mode, highway) {
+  const get = (id) => F.get(id);
+  const E = [];   // 区間（道路の中間点から中間点まで）
   for (const r of F.ofKind('road')) {
     if (isAir(r)) continue;
     const t = ROAD_TYPES[r.type] || {};
     if (mode === 'car' && t.walk) continue;
     if (mode !== 'car' && isHighway(r)) continue;
     if (mode === 'car' && !highway && isHighway(r)) continue;
-    const g = tessellate(r, (id) => F.get(id));
+    const g = tessellate(r, get);
     g.segs.forEach((pts, i) => {
-      let len = 0; for (let k = 1; k < pts.length; k++) len += Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]);
       const a = r.nodes[i], b = r.nodes[i + 1];
+      const la = get(a)?.lv || 0, lb = get(b)?.lv || 0;
       const speed = mode === 'car' ? (isHighway(r) ? MODES.car.hwSpeed : MODES.car.speed) : MODES[mode === 'train' ? 'walk' : mode].speed;
-      const e = { len, cost: len / (speed / 3.6), road: r, seg: i, pts };
-      add(a, { ...e, to: b, fwd: true });
-      if (!(mode === 'car' && t.oneway)) add(b, { ...e, to: a, fwd: false });
+      E.push({ u: a, v: b, pts, len: polyLen(pts), road: r, seg: i, w: r.segs[i]?.w || t.w || 8, lv: la === lb ? la : null,
+        oneway: mode === 'car' && !!t.oneway, mps: speed / 3.6, cuts: [] });
     });
   }
+  // 細かい線分を升目に登録（交わり・触れ合いを速く探すため）
+  const C = 64, grid = new Map(), pieces = [];
+  E.forEach((e, ei) => {
+    let acc = 0;
+    for (let k = 0; k < e.pts.length - 1; k++) {
+      const p = e.pts[k], q = e.pts[k + 1], L = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      const pi = pieces.length; pieces.push({ ei, p, q, at: acc, L });
+      acc += L;
+      for (let gx = Math.floor(Math.min(p[0], q[0]) / C); gx <= Math.floor(Math.max(p[0], q[0]) / C); gx++)
+        for (let gz = Math.floor(Math.min(p[1], q[1]) / C); gz <= Math.floor(Math.max(p[1], q[1]) / C); gz++) {
+          const k2 = gx * 100003 + gz; let a = grid.get(k2); if (!a) grid.set(k2, (a = [])); a.push(pi);
+        }
+    }
+  });
+  const shareNode = (a, b) => a.u === b.u || a.u === b.v || a.v === b.u || a.v === b.v;
+  const nodeNear = (e, P, d = 1.5) => [e.u, e.v].some((id) => { const n = get(id); return n && Math.hypot(n.x - P[0], n.z - P[1]) < d; });
+  let nid = 0;
+  // 1. 交わっている所（同じ高さどうし。坂の区間は除く）
+  const seenPair = new Set();
+  for (const list of grid.values()) {
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      const A = pieces[list[i]], B = pieces[list[j]];
+      if (A.ei === B.ei) continue;
+      const ea = E[A.ei], eb = E[B.ei];
+      if (ea.lv === null || ea.lv !== eb.lv) continue;
+      const P = segX(A.p, A.q, B.p, B.q);
+      if (!P) continue;
+      if (shareNode(ea, eb) && (nodeNear(ea, P) || nodeNear(eb, P))) continue;   // すでに交差点でつながっている
+      if (nodeNear(ea, P, 0.3) && nodeNear(eb, P, 0.3)) continue;
+      const pk = `${Math.min(A.ei, B.ei)}:${Math.max(A.ei, B.ei)}:${Math.round(P[0])}:${Math.round(P[1])}`;
+      if (seenPair.has(pk)) continue; seenPair.add(pk);
+      const id = `x${nid++}`;
+      ea.cuts.push({ id, along: A.at + Math.hypot(P[0] - A.p[0], P[1] - A.p[1]) });
+      eb.cuts.push({ id, along: B.at + Math.hypot(P[0] - B.p[0], P[1] - B.p[1]) });
+    }
+  }
+  // 2. 道路の端（行き止まり）が、別の道路に触れている所
+  const extra = [];   // 端から触れた所への短いつなぎ
+  const ends = new Map();
+  for (const e of E) for (const [id, isU] of [[e.u, true], [e.v, false]]) {
+    const r = e.road;
+    const terminal = isU ? r.nodes[0] === id && e.seg === 0 : r.nodes[r.nodes.length - 1] === id && e.seg === r.segs.length - 1;
+    if (!terminal || F.roadsOf(id).size > 1 || e.lv === null) continue;
+    ends.set(id, e);
+  }
+  for (const [id, e] of ends) {
+    const n = get(id); if (!n) continue;
+    const gx = Math.floor(n.x / C), gz = Math.floor(n.z / C);
+    let best = null;
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (const pi of grid.get((gx + i) * 100003 + (gz + j)) || []) {
+      const pc = pieces[pi], o = E[pc.ei];
+      if (o === e || o.lv !== e.lv || o.u === id || o.v === id) continue;
+      const dx = pc.q[0] - pc.p[0], dz = pc.q[1] - pc.p[1], L2 = dx * dx + dz * dz;
+      let t = L2 ? ((n.x - pc.p[0]) * dx + (n.z - pc.p[1]) * dz) / L2 : 0; t = Math.max(0, Math.min(1, t));
+      const P = [pc.p[0] + dx * t, pc.p[1] + dz * t], d = Math.hypot(P[0] - n.x, P[1] - n.z);
+      const lim = e.w / 2 + o.w / 2 + 1;
+      if (d <= lim && (!best || d < best.d)) best = { d, o, P, along: pc.at + Math.sqrt(L2) * t };
+    }
+    if (!best) continue;
+    const o = best.o;
+    let to;
+    if (best.along < 0.5) to = o.u; else if (best.along > o.len - 0.5) to = o.v;
+    else { to = `t${nid++}`; o.cuts.push({ id: to, along: best.along }); }
+    if (to === id) continue;
+    const pts = [[n.x, n.z], best.P];
+    extra.push({ a: id, b: to, len: best.d, mps: Math.min(e.mps, o.mps), pts });
+  }
+  // 3. グラフにする（区切りのある区間は数珠つなぎに分ける）
+  const adj = new Map();
+  const add = (a, x) => { if (!adj.has(a)) adj.set(a, []); adj.get(a).push(x); };
+  for (const e of E) {
+    const chain = [{ id: e.u, along: 0 }, ...e.cuts.sort((p, q) => p.along - q.along), { id: e.v, along: e.len }];
+    for (let k = 0; k < chain.length - 1; k++) {
+      const a = chain[k], b = chain[k + 1];
+      if (a.id === b.id) continue;
+      const pts = chain.length === 2 ? e.pts : slicePts(e.pts, a.along, b.along), len = Math.max(0, b.along - a.along);
+      const x = { len, cost: len / e.mps, road: e.road, seg: e.seg, pts };
+      add(a.id, { ...x, to: b.id, fwd: true });
+      if (!e.oneway) add(b.id, { ...x, to: a.id, fwd: false });
+    }
+  }
+  for (const x of extra) {
+    const base = { len: x.len, cost: x.len / x.mps, road: null, seg: -1, pts: x.pts };
+    add(x.a, { ...base, to: x.b, fwd: true });
+    add(x.b, { ...base, to: x.a, fwd: false });
+  }
   return adj;
+}
+function segX(a, b, c, d) {
+  const r = [b[0] - a[0], b[1] - a[1]], s = [d[0] - c[0], d[1] - c[1]];
+  const den = r[0] * s[1] - r[1] * s[0];
+  if (Math.abs(den) < 1e-9) return null;
+  const t = ((c[0] - a[0]) * s[1] - (c[1] - a[1]) * s[0]) / den;
+  const u = ((c[0] - a[0]) * r[1] - (c[1] - a[1]) * r[0]) / den;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return [a[0] + r[0] * t, a[1] + r[1] * t];
 }
 
 /** 点に一番近い、グラフの中のノード */
@@ -201,7 +309,7 @@ export function routeRoad(F, mode, from, to, opts = {}) {
   // 通る道路名（同じ名前が続くものはまとめる）
   const steps = [];
   for (const e of edges) {
-    if (e.len < 0.01) continue;
+    if (e.len < 0.01 || !e.road) continue;
     const name = e.road.name || ROAD_TYPES[e.road.type]?.label || '道路';
     const last = steps[steps.length - 1];
     if (last && last.name === name) last.len += e.len; else steps.push({ name, len: e.len, highway: isHighway(e.road) });

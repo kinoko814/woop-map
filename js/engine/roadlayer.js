@@ -80,7 +80,7 @@ export class RoadLayer {
     // 川は「地下の道路」と「地上の道路」のあいだに描く → 道路が必ず上になる
     drawBorders(ctx, v, borderItems, this.addrEdit, !this.edit);
     const labelData = drawRoadItems(ctx, v, items, F, this.getNode, { deferLabels: true, beforeGround: () => drawRivers(ctx, v, riverItems, this.isWater) });
-    drawRails(ctx, v, railItems, this.getNode);
+    drawRails(ctx, v, railItems, this.getNode, { metroSolid: !this.edit });
 
     // 駅の形（画面の幅が 3km より狭いとき）と出口
     if (span < 3000) drawStationShapes(ctx, v, lists.station, F, sel);
