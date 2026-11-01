@@ -59,8 +59,7 @@ export async function startEditor(root, store, nav) {
     const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith('image/'));
     if (!files.length) return toast('画像ファイル（PNG・JPG など）をドロップしてください');
     const r = canvas.getBoundingClientRect();
-    let at = view.toWorld(e.clientX - r.left, e.clientY - r.top);
-    for (const f of files) { await uploadImage(f, at); at = [at[0] + 40, at[1] + 40]; }
+    await uploadImages(files, view.toWorld(e.clientX - r.left, e.clientY - r.top));
   });
 
   const view = new MapView(canvas, terrain);
@@ -459,7 +458,7 @@ export async function startEditor(root, store, nav) {
   }
 
   function renderImageOpts() {
-    const file = h('input', { type: 'file', accept: 'image/*', style: { display: 'none' }, onchange: () => { if (file.files[0]) uploadImage(file.files[0]); file.value = ''; } });
+    const file = h('input', { type: 'file', accept: 'image/*', multiple: true, style: { display: 'none' }, onchange: () => { const fs = [...file.files]; file.value = ''; if (fs.length) uploadImages(fs); } });
     const list = h('div', { class: 'layer-list' });
     const items = [...overlays.items].reverse();
     if (!items.length) list.append(h('div', { class: 'muted' }, 'まだ画像がありません。マイクラのマップMODで書き出した画像をアップロードしてください。'));
@@ -473,6 +472,9 @@ export async function startEditor(root, store, nav) {
     const parts = [h('h3', {}, '画像レイヤー'),
       h('button', { class: 'btn primary', style: { width: '100%', justifyContent: 'center' }, onclick: () => file.click() }, icon('upload'), '画像をアップロード'), file,
       h('div', { class: 'muted', style: { marginTop: '6px' } }, '画像は編集モードでだけ表示され、表示モードには出ません。縦横比は固定です。'),
+      h('div', { class: 'hint', style: { marginTop: '8px' } },
+        h('div', {}, h('b', {}, 'JourneyMap のタイル画像'), 'は、ファイル名（例：0,0.png・-1,0.png）から自動で正しい座標に置きます。まとめて選ぶか、地図にドラッグ＆ドロップしてください。'),
+        h('div', {}, '同じタイルをもう一度アップロードすると、新しい画像に置き換わります。')),
       list];
     const s = overlays.selected;
     if (s) {
@@ -507,26 +509,68 @@ export async function startEditor(root, store, nav) {
     opts.replaceChildren(...parts);
   }
 
-  /** 画像レイヤーを追加。at を渡すとその地点を中心に置く（ドラッグ＆ドロップ） */
-  async function uploadImage(f, at = null) {
-    toast('画像を読み込み中…', 0);
-    try {
-      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(f); });
-      const w = img.naturalWidth, ar = img.naturalHeight / img.naturalWidth;
-      const c = at || [view.x, view.z];
-      const meta = {
-        name: f.name, x: Math.round(c[0] - w / 2), z: Math.round(c[1] - (w * ar) / 2), w, ar,
-        opacity: 0.5, visible: true, ord: (overlays.items.at(-1)?.ord ?? 0) + 1,
-      };
-      const row = await store.addOverlay(f, meta);
-      overlays.set([...overlays.items, row]);
-      overlays.selectedId = row.id;
-      if (st.tool !== 'image') setTool('image');
-      renderOpts();
-      view.setView(meta.x + w / 2, meta.z + (w * ar) / 2, Math.min(view.w / w, view.h / (w * ar)) * 0.85);
-      hideToast();
-      toast('配置しました（1px = 1ブロック）。位置は数値かドラッグで合わせてください');
-    } catch (e) { console.error(e); toast('画像のアップロードに失敗しました'); }
+  /**
+   * JourneyMap のタイル画像か（ファイル名が「X,Z」）。512m 四方ごとに書き出され、
+   * 「0,0」は左上が (0,0)・右下が (511,511)、「-1,0」は左上が (-512,0) …
+   */
+  const TILE = 512;
+  function parseTile(name) {
+    const m = String(name || '').replace(/\.[a-z0-9]+$/i, '').match(/^\s*(-?\d+)\s*,\s*(-?\d+)\s*(?:\(\d+\))?\s*$/);
+    return m ? { tx: +m[1], tz: +m[2] } : null;
+  }
+  /** 画像レイヤーを追加（1枚）。at を渡すとその地点を中心に置く（ドラッグ＆ドロップ） */
+  async function uploadImage(f, at = null) { return uploadImages([f], at); }
+  /**
+   * 画像をまとめて追加。JourneyMap のタイル（ファイル名「X,Z」）は自動で正しい座標に置く。
+   * 同じタイルがすでにあれば新しい画像に置き換える
+   */
+  async function uploadImages(files, at = null) {
+    files = [...files].filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    const placed = [];
+    let tiles = 0, replaced = 0, failed = 0;
+    let c = at || [view.x, view.z];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      toast(files.length > 1 ? `画像をアップロード中… ${i + 1}/${files.length}` : '画像を読み込み中…', 0);
+      try {
+        const url = URL.createObjectURL(f);
+        const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+        URL.revokeObjectURL(url);
+        const ar = img.naturalHeight / img.naturalWidth;
+        const tile = parseTile(f.name);
+        let meta;
+        if (tile) {
+          // タイル：左上が (X×512, Z×512)、幅 512m（画像の解像度に関係なく 1タイル = 512 ブロック）
+          meta = { name: `${tile.tx},${tile.tz}`, x: tile.tx * TILE, z: tile.tz * TILE, w: TILE, ar };
+          const old = overlays.items.find((o) => parseTile(o.name)?.tx === tile.tx && parseTile(o.name)?.tz === tile.tz);
+          if (old) { await store.deleteOverlay(old.id); overlays.set(overlays.items.filter((o) => o.id !== old.id)); replaced++; }
+          tiles++;
+        } else {
+          const w = img.naturalWidth;
+          meta = { name: f.name, x: Math.round(c[0] - w / 2), z: Math.round(c[1] - (w * ar) / 2), w, ar };
+          c = [c[0] + 40, c[1] + 40];
+        }
+        Object.assign(meta, { opacity: 0.5, visible: true, ord: (overlays.items.at(-1)?.ord ?? 0) + 1 });
+        const row = await store.addOverlay(f, meta);
+        overlays.set([...overlays.items, row]);
+        placed.push(row);
+      } catch (e) { console.error(e); failed++; }
+    }
+    hideToast();
+    if (!placed.length) { toast('画像のアップロードに失敗しました'); return; }
+    overlays.selectedId = placed[placed.length - 1].id;
+    if (st.tool !== 'image') setTool('image');
+    renderOpts();
+    // 追加した画像がすべて見えるように
+    const x0 = Math.min(...placed.map((o) => o.x)), z0 = Math.min(...placed.map((o) => o.z));
+    const x1 = Math.max(...placed.map((o) => o.x + o.w)), z1 = Math.max(...placed.map((o) => o.z + o.w * o.ar));
+    view.setView((x0 + x1) / 2, (z0 + z1) / 2, Math.min(view.w / (x1 - x0), view.h / (z1 - z0)) * 0.85);
+    const msg = [];
+    if (tiles) msg.push(`JourneyMap のタイル ${tiles} 枚を座標どおりに配置しました${replaced ? `（${replaced} 枚は置き換え）` : ''}`);
+    if (placed.length - tiles > 0) msg.push(`画像 ${placed.length - tiles} 枚を配置しました（1px = 1ブロック）。位置は数値かドラッグで合わせてください`);
+    if (failed) msg.push(`${failed} 枚は失敗しました`);
+    toast(msg.join('。'), 4500);
   }
   async function saveOverlay(it, patch) { try { await store.updateOverlay(it.id, patch); } catch (e) { console.error(e); toast('画像の保存に失敗しました'); } }
   async function reorder(s, dir) {
