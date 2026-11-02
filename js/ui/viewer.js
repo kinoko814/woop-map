@@ -23,6 +23,7 @@ import { describe, stationTitle } from './describe.js';
 import { BUS_STOP_COLOR } from '../engine/bus.js';
 const hubTitle = (f) => (!f ? '' : f.kind === 'busstop' ? `${f.name || 'バス停'}（バス停）` : stationTitle(f));
 
+const START_SPAN = 5000;   // 表示モードを開いたときの画面の横幅（m）
 const CATEGORIES = [['conv', 'コンビニ'], ['food', '食堂'], ['super', 'スーパー'], ['hotel', 'ホテル'], ['gas', 'ガソリンスタンド'], ['ev', 'EVスタンド'], ['hospital', '病院'], ['parking', '駐車場'], ['bank', '銀行'], ['pharmacy', '薬局']];
 
 export async function startViewer(root, store, { backToEdit, toLogin, loggedIn } = {}) {
@@ -42,7 +43,7 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   const A = layer.addr;
 
   // ---------- 骨組み ----------
-  const qInput = h('input', { type: 'text', placeholder: `${map.name} を検索`, 'aria-label': '場所を検索', autocomplete: 'off' });
+  const qInput = h('input', { type: 'text', placeholder: '場所・座標（例 100,-200）を検索', 'aria-label': '場所を検索', autocomplete: 'off' });
   const suggest = h('div', { class: 'suggest', hidden: true });
   const search = h('div', { class: 'v-top' },
     h('div', { class: 'v-search' },
@@ -61,7 +62,13 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   root.append(search, chips, tools, coordsBox(view), zoomBox(view, { grid: false }));
   if (backToEdit) root.append(h('button', { class: 'btn v-back', onclick: backToEdit }, icon('edit'), '編集に戻る'));
   else if (toLogin) root.append(h('button', { class: 'btn v-back', onclick: toLogin }, icon('edit'), loggedIn ? '編集する' : 'ログインして編集'));
-  view.fitAll();
+  // 最初は、管理画面で指定した地点を、画面の横幅いっぱいで 5km が入るくらいに拡大して表示
+  {
+    const hx = Number.isFinite(map.home_x) ? map.home_x : Math.max(mb.x0, Math.min(mb.x1, 0));
+    const hz = Number.isFinite(map.home_z) ? map.home_z : Math.max(mb.z0, Math.min(mb.z1, 0));
+    view._resize();   // 画面に置いた直後の大きさで計算
+    view.setView(hx, hz, (view.w || window.innerWidth) / START_SPAN);
+  }
 
   // ---------- 経路・距離の描画 ----------
   const route = { active: false, from: null, to: null, mode: 'car', highway: true, picking: null, result: null };
@@ -211,7 +218,28 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
     if (f.kind === 'area' && f.poly) { const xs = f.poly.map((p) => p[0]), zs = f.poly.map((p) => p[1]); s = Math.min(view.w / (Math.max(...xs) - Math.min(...xs) || 1), view.h / (Math.max(...zs) - Math.min(...zs) || 1)) * 0.6; }
     view.setView(x, z, Math.min(s, 3));
   }
+  /** 「X,Z」と入力されたら座標とみなす（全角のカンマ・読点、空白も可） */
+  function parseCoord(q) {
+    const m = String(q).replace(/[－−]/g, '-').replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+      .match(/^\s*[xX]?\s*(-?\d+(?:\.\d+)?)\s*[,，、]\s*[zZ]?\s*(-?\d+(?:\.\d+)?)\s*$/);
+    return m ? [+m[1], +m[2]] : null;
+  }
+  function goCoord([x, z]) {
+    suggest.hidden = true;
+    view.setView(x, z, Math.max(view.scale, view.w / 1000));   // 画面の幅 1km くらいまで寄る
+    layer.selected = null; place.open && !route.active && place.hide();
+    pin = [Math.floor(x), Math.floor(z)];
+    placePopup(); view.requestDraw();
+  }
   function runSearch(enter) {
+    const xz = parseCoord(qInput.value);
+    if (xz) {
+      if (enter) return goCoord(xz);
+      suggest.replaceChildren(h('button', { class: 'sug-item', onclick: () => goCoord(xz) },
+        h('span', { class: 'sug-ic' }, '座'), h('span', { class: 'sug-txt' }, h('b', {}, `X ${fmt(xz[0])}　Z ${fmt(xz[1])}`), h('span', { class: 'muted' }, 'この座標を表示'))));
+      suggest.hidden = false;
+      return;
+    }
     const res = searchAll(qInput.value);
     if (enter && res[0]) { pickResult(res[0]); return; }
     suggest.replaceChildren(...res.map((r) => resultRow(r, pickResult)));

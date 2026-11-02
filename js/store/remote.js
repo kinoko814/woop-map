@@ -260,6 +260,13 @@ export class RemoteStore {
     if (error) throw error;
     Object.assign(this.map, v);
   }
+  /** 表示モードを開いたときに最初に表示する地点 */
+  async setStartView(x, z) {
+    const v = { home_x: Math.round(x), home_z: Math.round(z) };
+    const { error } = await this.sb.from('maps').update(v).eq('id', this.mapId);
+    if (error) throw error;
+    Object.assign(this.map, v);
+  }
   async isHome() {
     const h = await homeMap(this.sb).catch(() => null);
     return h?.id === this.mapId;

@@ -105,9 +105,19 @@ export function createAddressTool({ view, F, session, layer, refreshPanel, borde
     const L = ADDR_LEVELS[li()];
     const seg = (opts, value, on) => h('div', { class: 'seg' }, ...opts.map(([l, v]) => h('button', { class: value === v ? 'on' : '', onclick: () => on(v) }, l)));
     const parts = [h('h3', {}, '住所'),
-      h('label', { class: 'lbl' }, '階層'),
-      seg(ADDR_LEVELS.map((x) => [x.label, x.key]), st.level, setLevel),
-      h('div', { class: 'row' }, seg([['① 境界線を引く', 'border'], ['② 地名を付ける', 'name']], st.mode, setMode))];
+      seg([['① 境界線を引く', 'border'], ['② 地名を付ける', 'name']], st.mode, setMode)];
+    if (st.mode === 'border') {
+      // 境界線の種類（県境・市町村境…）。上の階層の線ほど、たくさんの階層の区切りになる
+      parts.push(h('label', { class: 'lbl' }, '引く境界線の種類'),
+        h('div', { class: 'border-kinds' }, ...ADDR_LEVELS.map((x, i) => h('button', { class: `border-kind ${st.level === x.key ? 'on' : ''}`, onclick: () => setLevel(x.key) },
+          lineSample(x), h('span', {}, `${x.label}境`), h('span', { class: 'muted' }, i === 0 ? 'すべての区切り' : i === ADDR_LEVELS.length - 1 ? '番地だけの区切り' : `${x.label}より下の区切り`)))),
+        h('div', { class: 'muted', style: { fontSize: '12px', margin: '6px 0 4px' } },
+          `例：番地の区切りは「番地境」で引くと、県や市の地名はその線に関係なく一気に付けられます。県境で引いた線は、市・区・町・番地の区切りにもなります。`),
+        bulkChange());
+    } else {
+      parts.push(h('label', { class: 'lbl' }, '地名を付ける階層'), seg(ADDR_LEVELS.map((x) => [x.label, x.key]), st.level, setLevel),
+        h('div', { class: 'muted', style: { fontSize: '12px', margin: '4px 0' } }, `${L.label}の地名は、${L.label}境とそれより上の境界線で囲まれた所に付きます（下の階層の線は関係ありません）。`));
+    }
     if (st.mode === 'border') {
       if (borderT.isBusy()) { const sub = h('div'); borderT.renderPanel(sub); sub.querySelector('h3')?.remove(); parts.push(sub); }
       else parts.push(h('div', { class: 'hint' },
@@ -144,6 +154,32 @@ export function createAddressTool({ view, F, session, layer, refreshPanel, borde
       if (!regions().length) parts.push(h('div', { class: 'muted', style: { marginTop: '8px' } }, `まだ${L.label}の地名がありません。上で入力して追加してください。`));
     }
     box.replaceChildren(...parts);
+  }
+  /** 線の見本（その種類の色・破線） */
+  function lineSample(L) {
+    const c = h('canvas', { width: 34, height: 10, class: 'line-sample' });
+    const g = c.getContext('2d');
+    g.strokeStyle = L.line; g.lineWidth = Math.max(1.5, L.width); g.setLineDash(L.dash);
+    g.beginPath(); g.moveTo(1, 5); g.lineTo(33, 5); g.stroke();
+    return c;
+  }
+  /** 引いた境界線の種類をまとめて変える（間違えて全部「県境」で引いてしまったときなど） */
+  function bulkChange() {
+    const opt = (sel) => ADDR_LEVELS.map((x) => h('option', { value: x.key, selected: x.key === sel }, `${x.label}境`));
+    const from = h('select', { 'aria-label': '変更前の種類' }, ...opt('pref'));
+    const to = h('select', { 'aria-label': '変更後の種類' }, ...opt('block'));
+    const count = (k) => [...F.ofKind('border')].filter((b) => b.level === k).length;
+    return h('details', { class: 'bulk' }, h('summary', {}, '引いた境界線の種類をまとめて変える'),
+      h('div', { class: 'inline', style: { marginTop: '6px', alignItems: 'center' } }, from, h('span', {}, '→'), to,
+        h('button', { class: 'btn', onclick: async () => {
+          if (from.value === to.value) return;
+          const n = count(from.value);
+          if (!n) return toast('その種類の境界線はありません');
+          const lf = ADDR_LEVELS[levelIndex(from.value)].label, lt = ADDR_LEVELS[levelIndex(to.value)].label;
+          if (!(await ask(`${lf}境 ${n} 本をすべて ${lt}境 に変えますか？（元に戻すで戻せます）`, '変える'))) return;
+          session.commitFeatures([...F.ofKind('border')].filter((b) => b.level === from.value).map((b) => ({ id: b.id, after: { ...b, level: to.value } })));
+          toast(`${n} 本を${lt}境にしました`); refreshPanel(); view.requestDraw();
+        } }, '変える')));
   }
   function validate() {
     if (st.activeId && !F.get(st.activeId)) { st.activeId = null; layer.addrActive = null; return true; }

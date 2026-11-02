@@ -10,6 +10,7 @@ import { drawAddrTints, drawBorders, drawAddrLabels, drawAddrHighlight } from '.
 import { drawRails, railVisible, drawStationShapes, drawStationMarks, drawExits } from './rails.js';
 import { drawAreaFills, drawBuildings, drawAreaLabels, drawPois, viewSpan, AREA_TYPES } from './shapes.js';
 import { drawBusRoutes, drawBusStops, routesAt } from './bus.js';
+import { drawDistricts } from './districts.js';
 
 const CASING = '#a9b1bb';
 const CASING_HIGH = '#8b939d';
@@ -18,6 +19,8 @@ const FONT = '"Noto Sans JP", system-ui, sans-serif';
 
 /** 縮尺バーの表示が 200m になる境目（1px あたり約3.3m）。これより縮小するとアイコン類を隠す */
 export const ICON_MPP = 200 / 60;
+/** 駅のマークを出す縮尺（1px あたりのメートル）。ほかのアイコンより広く */
+export const STATION_MPP = 8;
 
 export class RoadLayer {
   constructor(view, F) {
@@ -46,6 +49,7 @@ export class RoadLayer {
     if (this.shapeDraft) (lists[this.shapeDraft.kind] ||= []).push(this.shapeDraft);
     const sel = this.selected;
 
+    drawDistricts(ctx, v, F, span);   // 縮小して建物が見えないときは、建物のある一帯を色で
     drawAreaFills(ctx, v, lists.area, sel);
     if (this.addrEdit !== null) drawAddrTints(ctx, v, this.addr, this.addrEdit, this.addrActive);
     const selF = sel ? F.get(sel) : null;
@@ -106,7 +110,8 @@ export class RoadLayer {
     const taken = [];
     this.hits = { stations: [], pois: [], areas: [] };
     const icons = mpp < ICON_MPP;
-    if (icons) this.hits.stations = drawStationMarks(ctx, v, lists.station, F, { onImage: () => v.requestDraw(), selectedId: sel, taken });
+    // 駅は、ほかのアイコンより縮小しても出す（画面の幅 10km くらいまで）
+    if (mpp < STATION_MPP) this.hits.stations = drawStationMarks(ctx, v, lists.station, F, { onImage: () => v.requestDraw(), selectedId: sel, taken });
     // バス停（路線を表示中なら、その停留所は少し縮小していても出す）
     const stopsToDraw = icons || this.busAll ? lists.busstop : lists.busstop.filter((b) => busHl.has(b.id) || b.id === sel);
     if (stopsToDraw.length && (icons || this.busAll || busHl.size)) this.hits.busstops = drawBusStops(ctx, v, stopsToDraw, sel, taken, { hl: busHl });

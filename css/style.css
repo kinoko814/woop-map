@@ -310,3 +310,13 @@ textarea { resize: vertical; line-height: 1.6; font-family: inherit; }
 .stop-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .stop-list li::marker { color: var(--ink-3); }
 .stop-list .icon-btn { width: 26px; height: 26px; }
+
+.drop-hint { position: absolute; inset: 8px; z-index: 30; border: 3px dashed var(--green); border-radius: 14px; background: rgba(117,210,195,.16); display: grid; place-items: center; pointer-events: none; }
+.drop-hint > div { background: #fff; color: var(--green-d); font-weight: 700; padding: 12px 18px; border-radius: 10px; box-shadow: var(--shadow); }
+
+.border-kinds { display: flex; flex-direction: column; gap: 4px; }
+.border-kind { display: grid; grid-template-columns: 38px auto 1fr; align-items: center; gap: 8px; border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 6px 8px; text-align: left; font-size: 13px; }
+.border-kind .muted { font-size: 11px; text-align: right; }
+.border-kind.on { border-color: var(--green); background: #e4f6f2; }
+.bulk summary { cursor: pointer; font-size: 12px; color: var(--ink-2); margin-top: 6px; }
+.bulk select { width: auto; flex: 1; }

@@ -831,8 +831,8 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
     }
     const b = sel?.roadId ? F.get(sel.roadId) : null;
     if (!b) { box.replaceChildren(...parts, h('div', { class: 'muted' }, '境界線は「住所」ツールで引きます。')); return; }
-    parts.push(h('div', { class: 'row' }, h('label', { class: 'lbl' }, 'この線の階層'),
-      seg2(ADDR_LEVELS.map((L) => [L.label, L.key]), b.level, (lv) => commit((tx) => { tx.edit(b.id).level = lv; }))),
+    parts.push(h('div', { class: 'row' }, h('label', { class: 'lbl' }, 'この境界線の種類'),
+      seg2(ADDR_LEVELS.map((L) => [`${L.label}境`, L.key]), b.level, (lv) => commit((tx) => { tx.edit(b.id).level = lv; }))),
       h('div', { class: 'muted', style: { marginTop: '8px' } }, '上の階層の境界線は、下の階層の境界にもなります（県境は市町村・区・住所名・番地の境界にも）。'));
     if (sel.nodeId) parts.push(nodeBlock(b, F.get(sel.nodeId)));
     parts.push(h('div', { class: 'btn-row' }, h('button', { class: 'btn danger', onclick: () => commit((tx) => deleteRoad(tx, b.id)) }, icon('trash'), '境界線を削除')));

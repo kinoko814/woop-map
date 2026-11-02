@@ -31,6 +31,24 @@ export async function startAdmin(root, store, nav) {
   // マップの範囲（自由に広げたり狭めたりできる）
   inner.append(boundsCard(store));
 
+  // 表示モードの最初の位置
+  {
+    const fx = h('input', { type: 'number', step: 1, id: 'home-x', value: Number.isFinite(map.home_x) ? map.home_x : 0 });
+    const fz = h('input', { type: 'number', step: 1, id: 'home-z', value: Number.isFinite(map.home_z) ? map.home_z : 0 });
+    inner.append(h('div', { class: 'card' },
+      h('h2', {}, '表示モードの最初の位置'),
+      h('p', { class: 'desc' }, '表示モードを開いたとき、この座標を中心に、画面の横幅いっぱいで 5km が入るくらいまで拡大して表示します。'),
+      h('div', { class: 'bounds-grid' },
+        h('div', {}, h('label', { class: 'lbl', for: 'home-x' }, 'X'), fx),
+        h('div', {}, h('label', { class: 'lbl', for: 'home-z' }, 'Z'), fz)),
+      h('div', { class: 'btn-row' }, h('button', { class: 'btn primary', onclick: async () => {
+        const x = Math.round(+fx.value), z = Math.round(+fz.value);
+        if (!Number.isFinite(x) || !Number.isFinite(z)) return toast('数字を入れてください');
+        try { await store.setStartView(x, z); toast('保存しました'); }
+        catch (e) { toast(/home_x/.test(e.message || '') ? 'データベースの更新が必要です（schema.sql をもう一度実行してください）' : `保存できませんでした：${e.message || e}`, 6000); }
+      } }, '保存'))));
+  }
+
   if (store.kind !== 'remote') return;
 
   // 共有リンク
