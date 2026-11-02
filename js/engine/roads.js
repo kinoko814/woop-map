@@ -39,7 +39,9 @@ export function roadVisible(road, mpp) {
  * @returns {segs: [[[x,z],...], ...], bbox:[x0,z0,x1,z1], len}
  */
 export function tessellate(road, getNode) {
-  const P = road.nodes.map((id) => { const n = getNode(id); return n ? [n.x, n.z] : [0, 0]; });
+  // 中間点がまだ届いていないときは、となりの点の位置で代わりにする（座標 0,0 に飛ばないように）
+  const P = road.nodes.map((id) => { const n = getNode(id); return n ? [n.x, n.z] : null; });
+  for (let i = 0; i < P.length; i++) if (!P[i]) P[i] = P.slice(0, i).reverse().find(Boolean) || P.slice(i + 1).find(Boolean) || [0, 0];
   const segs = [];
   let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity, len = 0;
   for (let i = 0; i < P.length - 1; i++) {

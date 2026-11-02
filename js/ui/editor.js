@@ -672,6 +672,7 @@ export async function startEditor(root, store, nav) {
   store.subscribe({
     onOp: (op) => session.applyRemote(op),
     onReload: (list) => session.reload(list),
+    onResync: () => session.resync(),
     onOverlays: async () => overlays.set(await store.listOverlays()),
     onPresence: (from, s) => {
       others.set(from, { ...s, t: performance.now() });

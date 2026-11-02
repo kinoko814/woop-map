@@ -66,6 +66,7 @@ export class RoadLayer {
     for (const f of F.items.values()) {
       if (f.kind !== 'road' && f.kind !== 'rail' && f.kind !== 'river' && f.kind !== 'border') continue;
       if (this.hide.has(f.id)) continue;
+      if (f.nodes.some((id) => !F.items.has(id))) continue;   // 中間点がまだ届いていない線は、届くまで描かない
       if (f.kind === 'border') { const g = overridden.has(f.id) ? tessellate(f, this.getNode) : this.geom.get(f); if (near(g)) borderItems.push({ border: f, g }); continue; }
       if (f.kind === 'road' ? !roadVisible(f, mpp) : f.kind === 'rail' ? !railVisible(f, mpp) : !riverVisible(f, mpp)) continue;
       const g = overridden.has(f.id) ? tessellate(f, this.getNode) : this.geom.get(f);
@@ -82,7 +83,7 @@ export class RoadLayer {
       else items.push({ road: this.draft.road, g, getNode: this.draft.getNode });
     }
     // 川は「地下の道路」と「地上の道路」のあいだに描く → 道路が必ず上になる
-    drawBorders(ctx, v, borderItems, this.addrEdit, !this.edit);
+    drawBorders(ctx, v, borderItems, this.addrEdit, !this.edit, this.edit ? null : this.isWater);
     const labelData = drawRoadItems(ctx, v, items, F, this.getNode, { deferLabels: true, beforeGround: () => drawRivers(ctx, v, riverItems, this.isWater) });
     drawRails(ctx, v, railItems, this.getNode, { metroSolid: !this.edit });
 
@@ -227,7 +228,8 @@ export function drawRoadItems(ctx, v, items, F, getNode, opts = {}) {
     for (const [end, nid] of [['e0', run.n0], ['e1', run.n1]]) {
       const idx = r.nodes.indexOf(nid);
       if (!(end === 'e0' ? idx === 0 : r.nodes.lastIndexOf(nid) === r.nodes.length - 1)) continue;
-      let half = -1;
+      // 相手の道路（そこを通り抜けているもの）のうち一番太いもの
+      let best = null;
       for (const oid of F.roadsOf(nid)) {
         if (oid === r.id) continue;
         const o = (items.find((it) => it.road.id === oid) || {}).road || F.get(oid);
@@ -235,14 +237,32 @@ export function drawRoadItems(ctx, v, items, F, getNode, opts = {}) {
         const k = o.nodes.indexOf(nid);
         if (k <= 0 || k >= o.nodes.length - 1) continue;   // 相手もそこで終わっている（L字など）なら今までどおり丸く
         const ow = Math.min(o.segs[k - 1]?.w || 0, o.segs[k]?.w || 0) || ROAD_TYPES[o.type]?.w || 8;
-        half = Math.max(half, ow / 2);
+        if (!best || ow > best.ow) best = { o, k, ow };
       }
-      if (half < 0) continue;
-      // 端を相手の道路の向こう側の縁まで延ばして切る（交差点の中は優先度の高い色になる）
+      if (!best) continue;
+      const J = getNode(nid); if (!J) continue;
+      // 相手の道路の、交差点での向き
+      const go = gByRoad.get(best.o.id);
+      let t = null;
+      if (go) {
+        const s1 = go.segs[best.k - 1], s2 = go.segs[best.k];
+        const u = s1 ? unit(s1[s1.length - 2], s1[s1.length - 1]) : null, w2 = s2 ? unit(s2[0], s2[1]) : null;
+        t = u && w2 ? norm([u[0] + w2[0], u[1] + w2[1]]) || u : u || w2;
+      }
+      if (!t) { const A = getNode(best.o.nodes[best.k - 1]), B = getNode(best.o.nodes[best.k + 1]); if (A && B) t = unit([A.x, A.z], [B.x, B.z]); }
       const pts = run.pts;
-      if (end === 'e1') { const a = pts[pts.length - 2], b = pts[pts.length - 1]; pts[pts.length - 1] = extend(a, b, half); }
-      else { const a = pts[1], b = pts[0]; pts[0] = extend(a, b, half); }
+      const d = end === 'e1' ? unit(pts[pts.length - 2], pts[pts.length - 1]) : unit(pts[1], pts[0]);   // 交差点へ向かう向き
+      if (!t || !d) continue;
+      let n = [-t[1], t[0]];
+      if (n[0] * d[0] + n[1] * d[1] < 0) n = [-n[0], -n[1]];
+      const half = best.ow / 2;
+      const sin = Math.max(0.15, Math.abs(t[0] * d[1] - t[1] * d[0])), cos = Math.abs(t[0] * d[0] + t[1] * d[1]);
+      // 斜めにぶつかっても角まで相手の道路の向こう側の縁に届くよう延ばし、その縁でまっすぐ切る
+      const ext = Math.min((half + (run.w / 2) * cos) / sin, (half + run.w) * 6);
+      if (end === 'e1') pts[pts.length - 1] = extend(pts[pts.length - 2], pts[pts.length - 1], ext);
+      else pts[0] = extend(pts[1], pts[0], ext);
       run[end] = true;
+      (run.clips ||= []).push({ J: [J.x, J.z], n, t, half, R: ext + run.w * 2 + half });
     }
   }
   ctx.save();
@@ -351,7 +371,22 @@ export function drawRoadLabels(ctx, v, data, taken) {
 function strokeRun(ctx, v, r) {
   path(ctx, v, r.pts);
   if (!r.e0 && !r.e1) { ctx.stroke(); return; }
+  ctx.save();
+  // 相手の道路の向こう側の縁で切る（斜めの接続で角がはみ出さないように）
+  //   交差点のまわりだけ（向こう側の縁から先の小さな四角）を描かないようにする
+  for (const c of r.clips || []) {
+    const R = c.R;
+    const P = [c.J[0] + c.n[0] * c.half, c.J[1] + c.n[1] * c.half];
+    const box = [[P[0] - c.t[0] * R, P[1] - c.t[1] * R], [P[0] + c.t[0] * R, P[1] + c.t[1] * R]];
+    box.push([box[1][0] + c.n[0] * R, box[1][1] + c.n[1] * R], [box[0][0] + c.n[0] * R, box[0][1] + c.n[1] * R]);
+    ctx.beginPath();
+    ctx.rect(-10, -10, v.w + 20, v.h + 20);
+    box.forEach(([x, z], i) => { const [sx, sy] = v.toScreen(x, z); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+    ctx.closePath(); ctx.clip('evenodd');
+  }
+  path(ctx, v, r.pts);
   ctx.lineCap = 'butt'; ctx.stroke(); ctx.lineCap = 'round';
+  ctx.restore();
   const rad = ctx.lineWidth / 2;
   ctx.save(); ctx.fillStyle = ctx.strokeStyle; ctx.setLineDash([]);
   for (const [cut, p] of [[r.e0, r.pts[0]], [r.e1, r.pts[r.pts.length - 1]]]) {
@@ -376,6 +411,8 @@ function splitHalf(pts) {
   }
   return [pts, [pts[pts.length - 1], pts[pts.length - 1]]];
 }
+const norm = (p) => { const L = Math.hypot(p[0], p[1]); return L ? [p[0] / L, p[1] / L] : null; };
+const unit = (a, b) => (a && b ? norm([b[0] - a[0], b[1] - a[1]]) : null);
 /** 点 b を、a→b の向きに len だけ延ばす */
 function extend(a, b, len) {
   const dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz) || 1;

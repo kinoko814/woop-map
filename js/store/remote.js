@@ -233,6 +233,8 @@ export class RemoteStore {
 
   // ---- 同時編集 ----
   subscribe(h) {
+    this.ready = false; this.queue = [];
+    let joinedOnce = false;
     const ch = this.sb.channel(`map-${this.mapId}`, { config: { broadcast: { self: false }, presence: { key: this.clientId } } });
     ch.on('broadcast', { event: 'op' }, ({ payload }) => h.onOp?.(payload))
       .on('broadcast', { event: 'reload' }, ({ payload }) => h.onReload?.(payload.keys))
@@ -240,11 +242,44 @@ export class RemoteStore {
       .on('presence', { event: 'sync' }, () => h.onPeople?.(Object.values(ch.presenceState()).map((a) => a[0])))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'overlays', filter: `map_id=eq.${this.mapId}` }, () => h.onOverlays?.())
       .subscribe(async (st) => {
-        if (st === 'SUBSCRIBED') await ch.track({ email: this.user?.email, id: this.clientId });
+        if (st === 'SUBSCRIBED') {
+          this.ready = true;
+          // つながる前に送れなかった操作を送る
+          const q = this.queue; this.queue = [];
+          for (const op of q) this._send(op);
+          // 切れてつながり直したときは、そのあいだのほかの人の変更を取り直す
+          if (joinedOnce) h.onResync?.();
+          joinedOnce = true;
+          await ch.track({ email: this.user?.email, id: this.clientId });
+        } else if (st === 'CHANNEL_ERROR' || st === 'TIMED_OUT' || st === 'CLOSED') {
+          this.ready = false;
+        }
       });
     this.ch = ch;
   }
-  sendOp(op) { this.ch?.send({ type: 'broadcast', event: 'op', payload: op }); }
+  sendOp(op) {
+    if (!this.ready) { this.queue.push(op); return; }
+    this._send(op);
+  }
+  _send(op) {
+    // 大きすぎる変更は届かないことがあるので、「どれが変わったか」だけ送り、相手は保存されたものを読み込む
+    if (op.t === 'feat' && JSON.stringify(op).length > 180000) {
+      const del = op.changes.filter((c) => !c.after).map((c) => c.id);
+      const ids = op.changes.filter((c) => c.after).map((c) => c.id);
+      op = { t: 'featIds', ids, del };
+    }
+    this.ch?.send({ type: 'broadcast', event: 'op', payload: op });
+  }
+  /** id を指定して図形を読み込む（同時編集で取りこぼした分の取り直し） */
+  async fetchFeatures(ids) {
+    const rows = [];
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await this.sb.from('features').select('id,kind,data').eq('map_id', this.mapId).in('id', ids.slice(i, i + 200));
+      if (error) throw error;
+      rows.push(...data);
+    }
+    return rows;
+  }
   sendReload(keys) { this.ch?.send({ type: 'broadcast', event: 'reload', payload: { keys } }); }
   trackPresence(state) { this.ch?.send({ type: 'broadcast', event: 'cursor', payload: { from: this.clientId, state } }); }
 

@@ -82,10 +82,52 @@ export class MapSession {
   }
   /** 他の編集者の操作 */
   applyRemote(op) {
+    if (op.t === 'featIds') {
+      // 大きな変更：消えたものは消し、それ以外は相手が保存し終わるころに読み込む
+      if (op.del?.length) this.features.apply(op.del.filter((id) => !this.dirtyFeat.has(id)).map((id) => ({ id, after: null })));
+      this._fetchLater(op.ids, 2500);
+      return Promise.resolve();
+    }
     return this._run(async () => {
       await this._apply(op);
+      if (op.t === 'feat') this._checkMissing(op.changes);
       this.onStatus(this.dirty.size || this.saving ? 'unsaved' : 'saved');
     });
+  }
+  /** 線が使っている中間点が手元にない（通知を取りこぼした）ときは、保存されたものを取りに行く */
+  _checkMissing(changes) {
+    const miss = new Set();
+    for (const c of changes) for (const n of c.after?.nodes || []) if (!this.features.get(n)) miss.add(n);
+    if (miss.size) this._fetchLater([...miss], 1500);
+  }
+  _fetchLater(ids, delay, tries = 3) {
+    if (!ids.length || !this.store.fetchFeatures) return;
+    setTimeout(async () => {
+      try {
+        const rows = await this.store.fetchFeatures(ids);
+        // 自分がまだ保存していない変更は上書きしない
+        const ch = rows.filter((r) => !this.dirtyFeat.has(r.id)).map((r) => ({ id: r.id, after: { id: r.id, kind: r.kind, ...r.data } }));
+        if (ch.length) this.features.apply(ch);
+        const got = new Set(rows.map((r) => r.id));
+        const left = ids.filter((id) => !got.has(id) && !this.features.get(id));
+        if (left.length && tries > 1) this._fetchLater(left, delay * 2, tries - 1);
+      } catch (e) { console.error(e); if (tries > 1) this._fetchLater(ids, delay * 2, tries - 1); }
+    }, delay);
+  }
+  /** つながり直したとき：保存されている図形を読み直して、取りこぼした変更を反映 */
+  async resync() {
+    if (!this.store.listFeatures) return;
+    try {
+      const rows = await this.store.listFeatures();
+      const ch = [];
+      for (const r of rows) {
+        if (this.dirtyFeat.has(r.id)) continue;
+        const after = { id: r.id, kind: r.kind, ...r.data };
+        const cur = this.features.get(r.id);
+        if (!cur || JSON.stringify(cur) !== JSON.stringify(after)) ch.push({ id: r.id, after });
+      }
+      if (ch.length) this.features.apply(ch);
+    } catch (e) { console.error(e); }
   }
   /** 他の編集者の Undo などで、チャンクを取り直す */
   reload(list) {

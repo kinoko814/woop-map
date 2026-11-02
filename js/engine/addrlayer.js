@@ -24,7 +24,7 @@ export function drawAddrTints(ctx, v, A, li, activeId) {
 }
 
 /** 境界線（階層ごとに線の太さ・破線を変える。縮小すると細かい階層から消える） */
-export function drawBorders(ctx, v, items, editLi = null, gray = false) {
+export function drawBorders(ctx, v, items, editLi = null, gray = false, isWater = null) {
   const span = viewSpan(v);
   ctx.save();
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
@@ -42,11 +42,45 @@ export function drawBorders(ctx, v, items, editLi = null, gray = false) {
     ctx.setLineDash(L.dash);
     for (const pts of it.g.segs) {
       ctx.beginPath();
-      pts.forEach(([x, z], k) => { const [sx, sy] = v.toScreen(x, z); k ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+      if (isWater) landPath(ctx, v, pts, isWater);   // 表示モード：海・湖の上には引かない
+      else pts.forEach(([x, z], k) => { const [sx, sy] = v.toScreen(x, z); k ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
       ctx.stroke();
     }
   }
   ctx.restore();
+}
+
+/** 線のうち、陸の上の部分だけを道筋にする（画面に見えている所だけ細かく調べる） */
+function landPath(ctx, v, pts, isWater) {
+  const b = v.bounds(), m = 20 * v.mpp;
+  const X0 = b.x0 - m, X1 = b.x1 + m, Z0 = b.z0 - m, Z1 = b.z1 + m;
+  const step = Math.max(1, v.mpp * 2);
+  for (let k = 0; k < pts.length - 1; k++) {
+    const c = clip(pts[k], pts[k + 1], X0, Z0, X1, Z1);
+    if (!c) continue;
+    const [[ax, az], [bx, bz]] = c;
+    const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / step));
+    let drawing = false;
+    for (let i = 0; i <= n; i++) {
+      const t = i / n, x = ax + (bx - ax) * t, z = az + (bz - az) * t;
+      const dry = !isWater(x, z);
+      if (dry) {
+        const [sx, sy] = v.toScreen(x, z);
+        if (drawing) ctx.lineTo(sx, sy); else { ctx.moveTo(sx, sy); drawing = true; }
+      } else drawing = false;
+    }
+  }
+}
+/** 線分を長方形の中に切り取る（Liang–Barsky） */
+function clip(p, q, x0, z0, x1, z1) {
+  let t0 = 0, t1 = 1;
+  const dx = q[0] - p[0], dz = q[1] - p[1];
+  for (const [pp, qq] of [[-dx, p[0] - x0], [dx, x1 - p[0]], [-dz, p[1] - z0], [dz, z1 - p[1]]]) {
+    if (pp === 0) { if (qq < 0) return null; continue; }
+    const r = qq / pp;
+    if (pp < 0) { if (r > t1) return null; if (r > t0) t0 = r; } else { if (r < t0) return null; if (r < t1) t1 = r; }
+  }
+  return [[p[0] + dx * t0, p[1] + dz * t0], [p[0] + dx * t1, p[1] + dz * t1]];
 }
 
 /** 地名（県・市町村・区・住所名・番地）。クリック判定用の箱を返す */

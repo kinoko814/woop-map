@@ -6,7 +6,7 @@
 //
 //   作り方：地図を升目に分けて、建物がある升目に種類を記録 →
 //           すき間を埋めて（膨らませてから縮める）「一帯」にする →
-//           小さな画像にして、なめらかに拡大して描く
+//           輪郭を作って、種類ごとに1色でくっきり塗る
 //   結果は建物が変わるまで覚えておく
 // =============================================================
 import { inPoly } from './roads.js';
@@ -15,7 +15,7 @@ export const DISTRICT_SPAN = [2200, 30000];   // この画面の幅（m）のあ
 const TYPES = ['house', 'commercial', 'industrial', 'office', 'public'];
 const COLORS = {
   house:      [236, 223, 199],
-  commercial: [246, 205, 186],
+  commercial: [247, 206, 202],
   industrial: [218, 210, 232],
   office:     [204, 218, 240],
   public:     [208, 233, 190],
@@ -31,13 +31,14 @@ export function drawDistricts(ctx, v, F, span) {
   const [sx, sy] = v.toScreen(d.x0, d.z0);
   const w = d.cols * d.C * v.scale, h = d.rows * d.C * v.scale;
   if (sx > v.w || sy > v.h || sx + w < 0 || sy + h < 0) return;
+  // 種類ごとに1色でくっきり塗る（ぼかさない）
   ctx.save();
-  // 縮小するにつれて少しずつ薄く
-  const t = (span - DISTRICT_SPAN[0]) / (DISTRICT_SPAN[1] - DISTRICT_SPAN[0]);
-  ctx.globalAlpha = Math.max(0.35, 1 - t * 0.6);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(d.canvas, sx, sy, w, h);
+  ctx.translate(sx, sy); ctx.scale(v.scale, v.scale);
+  ctx.lineJoin = 'round'; ctx.lineWidth = 1 / v.scale;   // 升目どうしのつなぎ目のすき間を隠す
+  for (const { color, path } of d.paths) {
+    ctx.fillStyle = color; ctx.strokeStyle = color;
+    ctx.fill(path); ctx.stroke(path);
+  }
   ctx.restore();
 }
 
@@ -110,19 +111,40 @@ function compute(F) {
     }
     frontier = next;
   }
-  // 5. 小さな画像に描く
-  const canvas = document.createElement('canvas');
-  canvas.width = cols; canvas.height = rows;
-  const g = canvas.getContext('2d');
-  const img = g.createImageData(cols, rows);
-  for (let i = 0; i < N; i++) {
-    if (!closed[i] || fillType[i] < 0) continue;
-    const col = COLORS[TYPES[fillType[i]]];
-    img.data[i * 4] = col[0]; img.data[i * 4 + 1] = col[1]; img.data[i * 4 + 2] = col[2]; img.data[i * 4 + 3] = 255;
+  // 5. 種類ごとに輪郭を作る（マーチングスクエア法：角を斜めに切ったなめらかな形）
+  const paths = [];
+  for (let t = 0; t < TYPES.length; t++) {
+    const on = (c2, r) => c2 >= 0 && r >= 0 && c2 < cols && r < rows && closed[r * cols + c2] && fillType[r * cols + c2] === t;
+    const path = new Path2D();
+    let any = false;
+    // 升目の中心どうしを結んだ格子で、4すみの状態から形を決める
+    for (let r = -1; r < rows; r++) {
+      let run = -1;   // 4すみ全部が中の升目は、横に続く分をまとめて長方形にする
+      for (let c2 = -1; c2 <= cols; c2++) {
+        const a = on(c2, r), b = on(c2 + 1, r), cc = on(c2 + 1, r + 1), d = on(c2, r + 1);
+        const full = a && b && cc && d && c2 < cols;
+        if (full) { if (run < 0) run = c2; continue; }
+        if (run >= 0) { path.rect((run + 0.5) * C, (r + 0.5) * C, (c2 - run) * C, C); run = -1; any = true; }
+        if (c2 >= cols) continue;
+        const idx = (a ? 8 : 0) | (b ? 4 : 0) | (cc ? 2 : 0) | (d ? 1 : 0);
+        if (!idx) continue;
+        const poly = MS[idx];
+        const ox = (c2 + 0.5) * C, oz = (r + 0.5) * C;
+        poly.forEach(([px, pz], k) => (k ? path.lineTo(ox + px * C, oz + pz * C) : path.moveTo(ox + px * C, oz + pz * C)));
+        path.closePath(); any = true;
+      }
+    }
+    if (any) { const [R2, G, B] = COLORS[TYPES[t]]; paths.push({ color: `rgb(${R2},${G},${B})`, path }); }
   }
-  g.putImageData(img, 0, 0);
-  return { canvas, x0, z0, C, cols, rows };
+  return { paths, x0, z0, C, cols, rows };
 }
+
+// マーチングスクエア法の形（4すみ a=左上 b=右上 c=右下 d=左下、辺の中点 T R B L）
+const a_ = [0, 0], b_ = [1, 0], c_ = [1, 1], d_ = [0, 1], T_ = [0.5, 0], R_ = [1, 0.5], B_ = [0.5, 1], L_ = [0, 0.5];
+const MS = {
+  1: [L_, B_, d_], 2: [B_, R_, c_], 3: [L_, R_, c_, d_], 4: [T_, b_, R_], 5: [L_, T_, b_, R_, B_, d_], 6: [T_, b_, c_, B_], 7: [L_, T_, b_, c_, d_],
+  8: [a_, T_, L_], 9: [a_, T_, B_, d_], 10: [a_, T_, R_, c_, B_, L_], 11: [a_, T_, R_, c_, d_], 12: [a_, b_, R_, L_], 13: [a_, b_, R_, B_, d_], 14: [a_, b_, c_, B_, L_], 15: [a_, b_, c_, d_],
+};
 
 /** 正方形の範囲での最大値（膨張）。行→列の順に分けて速く */
 function dilate(a, cols, rows, R) { return boxOp(a, cols, rows, R, 1); }
