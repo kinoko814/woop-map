@@ -185,6 +185,8 @@ export class Terrain {
     const c = this.chunks.get(k);
     if (!c) return { cx: cxOf(k), cz: czOf(k), u: 0, data: null, pv: null };
     if (c.u !== null) return { cx: c.cx, cz: c.cz, u: c.u, data: null, pv: null };
+    // 本データがない（読み込み前・手放した後）ものを書き出すと地形が消えるので、はっきりエラーにする
+    if (!c.data || !c.pv) throw new Error(`地形データが読み込まれていません（${c.cx},${c.cz}）`);
     return { cx: c.cx, cz: c.cz, u: null, data: rleEncode(c.data), pv: rleEncode(c.pv) };
   }
 

@@ -26,7 +26,9 @@ export class MapSession {
     this.onStatus = () => {};     // ('saving'|'saved'|'unsaved'|'error'|'busy', msg)
     this.onHistory = () => {};
     // 保存前のチャンクはメモリから追い出さない
-    terrain.protectFn = (k) => this.dirty.has(k);
+    // 未保存・保存中のチャンクは、メモリ節約のために本データを捨てない（捨てると変更が消える）
+    this.inFlight = new Set();
+    terrain.protectFn = (k) => this.dirty.has(k) || this.inFlight.has(k);
   }
 
   async load(progress = () => {}) {
@@ -185,6 +187,7 @@ export class MapSession {
     if (!this.dirty.size && !this.dirtyFeat.size) return;
     this.saving = true;
     const keys = [...this.dirty]; this.dirty.clear();
+    for (const k of keys) this.inFlight.add(k);
     const fids = [...this.dirtyFeat]; this.dirtyFeat.clear();
     const reload = this._reloadAfterSave || []; this._reloadAfterSave = [];
     this.onStatus('saving', '保存中…');
@@ -196,13 +199,15 @@ export class MapSession {
         if (gone.length) await this.store.deleteFeatures(gone);
       }
       const plan = this._plan(keys);
+      for (const k of plan.put) this.inFlight.add(k);   // 書き出すチャンクは保存が終わるまで守る
       // まだ細かいデータを読み込んでいないチャンクも書き直すことがあるので、先に読み込む
-      const notLoaded = plan.put.filter((k) => { const c = this.terrain.chunks.get(k); return c && c.u === null && !c.data; });
-      if (notLoaded.length) await this.terrain.ensureLoaded(notLoaded);
-      if (notLoaded.some((k) => { const c = this.terrain.chunks.get(k); return c && c.u === null && !c.data; })) throw new Error('地形データの読み込みが終わっていません');
+      const missing = () => plan.put.filter((k) => { const c = this.terrain.chunks.get(k); return c && c.u === null && !c.data; });
+      for (let i = 0; i < 3 && missing().length; i++) await this.terrain.ensureLoaded(missing());
+      if (missing().length) throw new Error('地形データの読み込みが終わっていません');
+      // 消す前に、書き出す内容を先に作っておく（途中で何かあっても中身を失わない）
+      const rows = [...plan.supers, ...plan.put.map((k) => ({ lv: 0, ...this.terrain.serialize(k) }))];
       if (plan.clearSupers.length) await this.store.deleteSupers(plan.clearSupers, SC);
       if (plan.del.length) await this.store.deleteRows(0, plan.del);
-      const rows = [...plan.supers, ...plan.put.map((k) => ({ lv: 0, ...this.terrain.serialize(k) }))];
       await this.store.saveRows(rows, (n) => this.onStatus('saving', `保存中… ${Math.round((n / rows.length) * 100)}%`));
       for (const [sk, u] of plan.newBases) this.bases.set(sk, u);
       if (reload.length) this.store.sendReload(reload.map((k) => [cxOf(k), czOf(k)]));
@@ -214,7 +219,7 @@ export class MapSession {
       this.lastError = e;
       this.onStatus('error', `保存に失敗しました（${e.message || e}）。自動で再試行します`);
       clearTimeout(this.saveTimer); this.saveTimer = setTimeout(() => this.flush(), 4000);
-    } finally { this.saving = false; }
+    } finally { this.saving = false; this.inFlight.clear(); }
   }
 
   /** 今すぐ保存（保存ボタン用）。全部保存できたら true */
