@@ -24,7 +24,7 @@ import { BUS_STOP_COLOR } from '../engine/bus.js';
 const hubTitle = (f) => (!f ? '' : f.kind === 'busstop' ? `${f.name || 'バス停'}（バス停）` : stationTitle(f));
 
 const START_SPAN = 5000;   // 表示モードを開いたときの画面の横幅（m）
-const CATEGORIES = [['conv', 'コンビニ'], ['food', '食堂'], ['super', 'スーパー'], ['hotel', 'ホテル'], ['gas', 'ガソリンスタンド'], ['ev', 'EVスタンド'], ['hospital', '病院'], ['parking', '駐車場'], ['bank', '銀行'], ['pharmacy', '薬局']];
+const CATEGORIES = [['conv', 'コンビニ'], ['food', '食堂'], ['cafe', 'カフェ'], ['restaurant', 'レストラン'], ['super', 'スーパー'], ['hotel', 'ホテル'], ['gas', 'ガソリンスタンド'], ['ev', 'EVスタンド'], ['hospital', '病院'], ['parking', '駐車場'], ['bank', '銀行'], ['pharmacy', '薬局']];
 
 export async function startViewer(root, store, { backToEdit, toLogin, loggedIn } = {}) {
   const map = store.map;
@@ -71,7 +71,7 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   }
 
   // ---------- 経路・距離の描画 ----------
-  const route = { active: false, from: null, to: null, mode: 'car', highway: true, picking: null, result: null };
+  const route = { active: false, from: null, to: null, mode: 'car', highway: true, main: true, picking: null, result: null };   // main: 主要道路を優先（最初からオン）
   const measure = { on: false, pts: [] };
   view.layers.push({ draw(ctx, v) {
     const line = (pts, color, w, dash) => {
@@ -316,7 +316,7 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
     route.result = null;
     if (route.from && route.to) {
       const t0 = performance.now();
-      route.result = route.mode === 'train' ? routeTrain(features, route.from.pt, route.to.pt) : routeRoad(features, route.mode, route.from.pt, route.to.pt, { highway: route.highway });
+      route.result = route.mode === 'train' ? routeTrain(features, route.from.pt, route.to.pt) : routeRoad(features, route.mode, route.from.pt, route.to.pt, { highway: route.highway, main: route.main });
       route.ms = performance.now() - t0;
     }
     view.requestDraw();
@@ -347,7 +347,9 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
       h('div', { class: 'route-ends' }, endField('from'), endField('to'),
         h('button', { class: 'icon-btn swap', title: '出発地と目的地を入れ替える', onclick: () => { [route.from, route.to] = [route.to, route.from]; calc(); renderRoute(); } }, icon('swap'))),
       h('div', { class: 'seg route-modes' }, ...Object.entries(MODES).map(([k, m]) => h('button', { class: route.mode === k ? 'on' : '', onclick: () => { route.mode = k; calc(); renderRoute(); } }, m.label))),
-      route.mode === 'car' ? h('label', { class: 'check', style: { margin: '8px 0 0' } }, h('input', { type: 'checkbox', checked: route.highway, onchange: (e) => { route.highway = e.target.checked; calc(); renderRoute(); } }), '高速道路を使う') : null,
+      route.mode === 'car' ? h('div', { class: 'route-opts' },
+        h('label', { class: 'check', style: { margin: '8px 0 0' } }, h('input', { type: 'checkbox', checked: route.main, onchange: (e) => { route.main = e.target.checked; calc(); renderRoute(); } }), '主要道路を優先する'),
+        h('label', { class: 'check', style: { margin: '4px 0 0' } }, h('input', { type: 'checkbox', checked: route.highway, onchange: (e) => { route.highway = e.target.checked; calc(); renderRoute(); } }), '高速道路を使う')) : null,
       route.picking ? h('div', { class: 'hint', style: { marginTop: '10px' } }, `地図をクリックして${route.picking === 'from' ? '出発地' : '目的地'}を選んでください`) : null,
     ];
     if (!route.from || !route.to) body.push(h('p', { class: 'muted', style: { marginTop: '14px' } }, '出発地と目的地を、検索するか地図で選んでください。施設や駅の情報パネルの「ここへ行く」からも使えます。'));
@@ -360,7 +362,7 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
         : l.kind === 'transfer' ? h('li', { class: 'leg' }, h('span', { class: 'leg-walk' }), h('div', { class: 'muted' }, `${stationTitle(l.from)}で乗り換え`))
         : h('li', { class: 'leg' }, h('span', { class: 'leg-walk' }), h('div', { class: 'muted' }, `徒歩 ${fmtDist(l.len)}（約${fmtTime(l.len / (MODES.walk.speed / 3.6))}）${l.to ? ` → ${hubTitle(l.to)}` : ' → 目的地'}`)))));
       else body.push(h('ol', { class: 'legs' }, ...res.steps.slice(0, 30).map((s2) => h('li', { class: 'leg' }, h('span', { class: s2.highway ? 'leg-hw' : 'leg-road' }), h('div', {}, h('b', {}, s2.name), h('span', { class: 'muted' }, ` ${fmtDist(s2.len)}`))))));
-      body.push(h('p', { class: 'muted', style: { marginTop: '8px' } }, route.mode === 'train' ? '電車・バスの時間は目安です（時刻表は考えていません。乗るときの待ち時間を電車2分・バス3分として計算）。' : `時間は平均の速さ（${route.mode === 'car' ? '一般道 時速40km・高速 時速80km' : route.mode === 'walk' ? '時速4.8km' : '時速15km'}）で計算した目安です。`));
+      body.push(h('p', { class: 'muted', style: { marginTop: '8px' } }, route.mode === 'train' ? '電車・バスの時間は目安です（時刻表は考えていません。乗るときの待ち時間を電車2分・バス3分として計算）。' : `時間は平均の速さ（${route.mode === 'car' ? '一般道 時速40km・高速 時速80km' : route.mode === 'walk' ? '時速4.8km' : '時速15km'}）で計算した目安です。${route.mode === 'walk' ? '' : 'カーブの多い道は速度を落として計算しています。'}${route.mode === 'car' && route.main ? '主要道路（黄色）と高速道路を優先して通ります。' : ''}`));
     }
     place.show({ title: '経路', kind: 'ルート検索', extra: h('div', { class: 'route-panel' }, ...body) });
   }

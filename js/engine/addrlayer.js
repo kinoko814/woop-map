@@ -3,6 +3,7 @@
 // =============================================================
 import { ADDR_LEVELS, levelIndex } from './address.js';
 import { viewSpan } from './shapes.js';
+import { drawOnLand, screenBBox } from './landmask.js';
 import { inPoly } from './roads.js';
 
 const FONT = '"Noto Sans JP", system-ui, sans-serif';
@@ -115,16 +116,18 @@ export function drawAddrLabels(ctx, v, A, taken, gray = false) {
 }
 
 /** 表示モードで地名をクリックしたとき：その地域を赤い半透明で */
-export function drawAddrHighlight(ctx, v, A, region) {
+export function drawAddrHighlight(ctx, v, A, region, isWater = null) {
   const li = levelIndex(region.level);
-  ctx.save();
-  for (const e of A.namedFaces(li)) {
-    if (e.region.id !== region.id) continue;
-    ctx.beginPath();
-    e.face.poly.forEach(([x, z], i) => { const [sx, sy] = v.toScreen(x, z); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(229, 57, 53, 0.16)'; ctx.fill();
-    ctx.strokeStyle = 'rgba(214, 40, 40, 0.85)'; ctx.lineWidth = 2; ctx.setLineDash([]); ctx.stroke();
-  }
-  ctx.restore();
+  const faces = A.namedFaces(li).filter((e) => e.region.id === region.id);
+  if (!faces.length) return;
+  // 表示モードでは海・湖の上は塗らない
+  drawOnLand(ctx, v, isWater, screenBBox(v, faces.map((e) => e.face.poly)), (g) => {
+    for (const e of faces) {
+      g.beginPath();
+      e.face.poly.forEach(([x, z], i) => { const [sx, sy] = v.toScreen(x, z); i ? g.lineTo(sx, sy) : g.moveTo(sx, sy); });
+      g.closePath();
+      g.fillStyle = 'rgba(229, 57, 53, 0.16)'; g.fill();
+      g.strokeStyle = 'rgba(214, 40, 40, 0.85)'; g.lineWidth = 2; g.setLineDash([]); g.stroke();
+    }
+  });
 }

@@ -50,10 +50,10 @@ export class RoadLayer {
     const sel = this.selected;
 
     drawDistricts(ctx, v, F, span);   // 縮小して建物が見えないときは、建物のある一帯を色で
-    drawAreaFills(ctx, v, lists.area, sel);
+    drawAreaFills(ctx, v, lists.area, sel, this.isWater);
     if (this.addrEdit !== null) drawAddrTints(ctx, v, this.addr, this.addrEdit, this.addrActive);
     const selF = sel ? F.get(sel) : null;
-    if (selF?.kind === 'addr') drawAddrHighlight(ctx, v, this.addr, selF);
+    if (selF?.kind === 'addr') drawAddrHighlight(ctx, v, this.addr, selF, this.edit ? null : this.isWater);
     drawBuildings(ctx, v, lists.building, sel);
     if (this.edit || sel) this._drawAreas(ctx, v, !this.edit);
 

@@ -196,6 +196,10 @@ export class MapSession {
         if (gone.length) await this.store.deleteFeatures(gone);
       }
       const plan = this._plan(keys);
+      // まだ細かいデータを読み込んでいないチャンクも書き直すことがあるので、先に読み込む
+      const notLoaded = plan.put.filter((k) => { const c = this.terrain.chunks.get(k); return c && c.u === null && !c.data; });
+      if (notLoaded.length) await this.terrain.ensureLoaded(notLoaded);
+      if (notLoaded.some((k) => { const c = this.terrain.chunks.get(k); return c && c.u === null && !c.data; })) throw new Error('地形データの読み込みが終わっていません');
       if (plan.clearSupers.length) await this.store.deleteSupers(plan.clearSupers, SC);
       if (plan.del.length) await this.store.deleteRows(0, plan.del);
       const rows = [...plan.supers, ...plan.put.map((k) => ({ lv: 0, ...this.terrain.serialize(k) }))];

@@ -23,16 +23,41 @@ const isAir = (r) => !!ROAD_TYPES[r.type]?.air;
  *   交わっている所・道路の端が別の道路に触れている所は、通り抜けられるようにつなぐ
  */
 const GRAPHS = new WeakMap();
-export function buildGraph(F, mode, { highway = true } = {}) {
+export function buildGraph(F, mode, { highway = true, main = false } = {}) {
   const kv = F.kindVer || {};
   const ver = `${kv.road || 0}|${kv.node || 0}`;
   let cache = GRAPHS.get(F);
   if (!cache || cache.ver !== ver) { cache = { ver, m: new Map() }; GRAPHS.set(F, cache); }
-  const key = `${mode}|${highway ? 1 : 0}`;
-  if (!cache.m.has(key)) cache.m.set(key, makeGraph(F, mode, highway));
+  const key = `${mode}|${highway ? 1 : 0}|${main && mode === 'car' ? 1 : 0}`;
+  if (!cache.m.has(key)) cache.m.set(key, makeGraph(F, mode, highway, main && mode === 'car'));
   return cache.m.get(key);
 }
-function makeGraph(F, mode, highway) {
+/** 主要道路優先のとき、一般道（白）を使いにくくする倍率 */
+const MINOR_WEIGHT = 1.4;
+/** カーブで速度を落とすための横方向の加速度（m/s²）。小さいほどカーブで遅くなる */
+const LAT_ACC = { car: 1.5, bike: 1.5, walk: 99, train: 99 };
+/**
+ * カーブの多さによる余分な時間（秒）。折れ線の角ごとに、曲がり具合からカーブの半径を見積もり、
+ * その半径で出せる速さ √(横加速度×半径) より速度が速ければ、その分ゆっくり走るとして時間を足す
+ */
+function curveExtra(pts, mps, lat) {
+  if (lat >= 99 || pts.length < 3) return 0;
+  let extra = 0;
+  for (let k = 1; k < pts.length - 1; k++) {
+    const ax = pts[k][0] - pts[k - 1][0], az = pts[k][1] - pts[k - 1][1];
+    const bx = pts[k + 1][0] - pts[k][0], bz = pts[k + 1][1] - pts[k][1];
+    const la = Math.hypot(ax, az), lb = Math.hypot(bx, bz);
+    if (la < 0.01 || lb < 0.01) continue;
+    const th = Math.acos(Math.max(-1, Math.min(1, (ax * bx + az * bz) / (la * lb))));
+    if (th < 0.02) continue;
+    const L = Math.min(la, lb);
+    const R = L / th;
+    const vc = Math.sqrt(lat * R);
+    if (vc < mps) extra += L / vc - L / mps;
+  }
+  return extra;
+}
+function makeGraph(F, mode, highway, main = false) {
   const get = (id) => F.get(id);
   const E = [];   // 区間（道路の中間点から中間点まで）
   for (const r of F.ofKind('road')) {
@@ -46,8 +71,12 @@ function makeGraph(F, mode, highway) {
       const a = r.nodes[i], b = r.nodes[i + 1];
       const la = get(a)?.lv || 0, lb = get(b)?.lv || 0;
       const speed = mode === 'car' ? (isHighway(r) ? MODES.car.hwSpeed : MODES.car.speed) : MODES[mode === 'train' ? 'walk' : mode].speed;
-      E.push({ u: a, v: b, pts, len: polyLen(pts), road: r, seg: i, w: r.segs[i]?.w || t.w || 8, lv: la === lb ? la : null,
-        oneway: mode === 'car' && !!t.oneway, mps: speed / 3.6, cuts: [] });
+      const len = polyLen(pts), mps = speed / 3.6;
+      const time = len / mps + curveExtra(pts, mps, LAT_ACC[mode] ?? 99);   // 本当にかかる時間（カーブ込み）
+      // 主要道路優先：黄色（主要道路）・高速道路以外は少し遠回りに感じるようにする（時間の表示には使わない）
+      const weight = main && r.color !== 'yellow' && !isHighway(r) ? MINOR_WEIGHT : 1;
+      E.push({ u: a, v: b, pts, len, time, weight, road: r, seg: i, w: r.segs[i]?.w || t.w || 8, lv: la === lb ? la : null,
+        oneway: mode === 'car' && !!t.oneway, mps, cuts: [] });
     });
   }
   // 細かい線分を升目に登録（交わり・触れ合いを速く探すため）
@@ -126,13 +155,14 @@ function makeGraph(F, mode, highway) {
       const a = chain[k], b = chain[k + 1];
       if (a.id === b.id) continue;
       const pts = chain.length === 2 ? e.pts : slicePts(e.pts, a.along, b.along), len = Math.max(0, b.along - a.along);
-      const x = { len, cost: len / e.mps, road: e.road, seg: e.seg, pts };
+      const time = e.len ? e.time * (len / e.len) : 0;
+      const x = { len, time, cost: time * e.weight, road: e.road, seg: e.seg, pts };
       add(a.id, { ...x, to: b.id, fwd: true });
       if (!e.oneway) add(b.id, { ...x, to: a.id, fwd: false });
     }
   }
   for (const x of extra) {
-    const base = { len: x.len, cost: x.len / x.mps, road: null, seg: -1, pts: x.pts };
+    const base = { len: x.len, time: x.len / x.mps, cost: x.len / x.mps, road: null, seg: -1, pts: x.pts };
     add(x.a, { ...base, to: x.b, fwd: true });
     add(x.b, { ...base, to: x.a, fwd: false });
   }
@@ -278,7 +308,7 @@ export function attachPoints(adj, points, maxD = 3000) {
     for (let k = 0; k < chain.length - 1; k++) {
       const a = chain[k], b = chain[k + 1];
       const pts = slicePts(e.pts, a.along, b.along), len = Math.max(0, b.along - a.along);
-      const part = { len, cost: e.cost * (len / L), road: e.road, seg: e.seg, pts };
+      const part = { len, cost: e.cost * (len / L), time: (e.time ?? e.cost) * (len / L), road: e.road, seg: e.seg, pts };
       push(a.id, { ...part, to: b.id, fwd: true });
       if (rev) push(b.id, { ...part, to: a.id, fwd: false });
     }
@@ -305,7 +335,8 @@ export function routeRoad(F, mode, from, to, opts = {}) {
   const off = a.d + b.d;   // 道路まで歩く距離
   const len = edges.reduce((s, e) => s + e.len, 0) + off;
   const speed = MODES[mode].speed;
-  const time = dist.get('B') + off / ((mode === 'car' ? 4.8 : speed) / 3.6);
+  // 表示する時間は、主要道路優先の重みを除いた本当の時間（カーブで遅くなる分は含む）
+  const time = edges.reduce((s, e) => s + (e.time ?? e.cost), 0) + off / ((mode === 'car' ? 4.8 : speed) / 3.6);
   // 通る道路名（同じ名前が続くものはまとめる）
   const steps = [];
   for (const e of edges) {

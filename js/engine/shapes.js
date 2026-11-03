@@ -5,6 +5,7 @@
 //   poi      : {id, kind:'poi', icon, name, desc, info, address, phone, photo, x, z}
 // =============================================================
 import { centroid } from './roads.js';
+import { drawOnLand, screenBBox } from './landmask.js';
 import { drawIcon, poiVisible, poiLabelVisible, ICONS } from './icons.js';
 
 export const AREA_TYPES = {
@@ -14,6 +15,8 @@ export const AREA_TYPES = {
   forest:   { label: '森',   short: '森',   fill: '#bfe0aa', edge: '#a3cf8c', text: '#2f6e35', show: 120000 },
   mountain: { label: '山',   short: '山',   fill: '#dfe6c6', edge: '#c3cfa2', text: '#6b5a3a', show: 120000 },
   airport:  { label: '空港', short: '空港', fill: '#e9e6f3', edge: '#c9c2de', text: '#4b4378', show: 200000 },
+  beach:    { label: '砂浜', short: '砂浜', fill: '#f4e6b8', edge: '#e2cf8f', text: '#8a6d1f', show: 60000, landOnly: true },   // 海の上には出さない
+  military: { label: '軍用地', short: '軍用地', fill: '#efdcdc', edge: '#c99292', text: '#7a3434', show: 120000, hatch: '#d9a9a9' },
 };
 export const BUILDING_TYPES = {
   house:      { label: '住宅',     fill: '#efe9df', edge: '#d3c9b9' },
@@ -42,15 +45,31 @@ const onScreen = (v, poly, m = 0) => {
 };
 
 /** 公園・森・山・空港の塗り（道路より下） */
-export function drawAreaFills(ctx, v, areas, selectedId) {
+export function drawAreaFills(ctx, v, areas, selectedId, isWater = null) {
   const span = viewSpan(v);
   ctx.save();
   for (const a of areas) {
     const t = AREA_TYPES[a.type];
     if (!t || t.outlineOnly || a.poly.length < 3 || span > t.show || !onScreen(v, a.poly)) continue;
-    polyPath(ctx, v, a.poly);
-    ctx.fillStyle = t.fill; ctx.fill();
-    ctx.strokeStyle = a.id === selectedId ? '#1f7c6f' : t.edge; ctx.lineWidth = a.id === selectedId ? 2.5 : 1; ctx.stroke();
+    const paint = (g) => {
+      polyPath(g, v, a.poly);
+      g.fillStyle = t.fill; g.fill();
+      if (t.hatch && v.mpp < 30) {
+        // 軍用地：斜線
+        g.save(); g.clip();
+        g.strokeStyle = t.hatch; g.lineWidth = 1.2;
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const [x, z] of a.poly) { const [sx, sy] = v.toScreen(x, z); x0 = Math.min(x0, sx); y0 = Math.min(y0, sy); x1 = Math.max(x1, sx); y1 = Math.max(y1, sy); }
+        g.beginPath();
+        for (let d = x0 - (y1 - y0); d < x1; d += 9) { g.moveTo(d, y1); g.lineTo(d + (y1 - y0), y0); }
+        g.stroke(); g.restore();
+        polyPath(g, v, a.poly);
+      }
+      g.strokeStyle = a.id === selectedId ? '#1f7c6f' : t.edge; g.lineWidth = a.id === selectedId ? 2.5 : 1; g.stroke();
+    };
+    // 砂浜は海の上には出さない（陸の上だけ）
+    if (t.landOnly && isWater) drawOnLand(ctx, v, isWater, screenBBox(v, [a.poly]), paint);
+    else paint(ctx);
   }
   ctx.restore();
 }
