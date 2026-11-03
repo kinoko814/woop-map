@@ -185,6 +185,24 @@ export class RemoteStore {
     }
   }
 
+  // ---- 口コミ（駅・施設）----
+  async listReviews(featureId) {
+    const { data, error } = await this.sb.from('reviews').select('id,nickname,rating,body,created_at')
+      .eq('map_id', this.mapId).eq('feature_id', featureId).order('created_at', { ascending: false }).limit(200);
+    if (error) throw error;
+    return data;
+  }
+  async addReview({ featureId, nickname, rating, body }) {
+    const row = { id: crypto.randomUUID(), map_id: this.mapId, feature_id: featureId, nickname, rating, body };
+    const { error } = await this.sb.from('reviews').insert(row);
+    if (error) throw error;
+    return { ...row, created_at: new Date().toISOString() };
+  }
+  async deleteReview(id) {
+    const { error } = await this.sb.from('reviews').delete().eq('id', id).eq('map_id', this.mapId);
+    if (error) throw error;
+  }
+
   // ---- 画像レイヤー ----
   async listOverlays() {
     // 1回で取れるのは1000件までなので、何千枚あっても全部読むよう分けて取る

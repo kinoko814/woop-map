@@ -19,6 +19,7 @@ import { RAIL_TYPES, railColor } from '../engine/rails.js';
 import { ADDR_LEVELS, levelIndex } from '../engine/address.js';
 import { routeRoad, routeTrain, fmtTime, MODES } from '../engine/route.js';
 import { createPlacePanel } from './place.js';
+import { reviewSection } from './reviews.js';
 import { describe, stationTitle } from './describe.js';
 import { BUS_STOP_COLOR } from '../engine/bus.js';
 const hubTitle = (f) => (!f ? '' : f.kind === 'busstop' ? `${f.name || 'バス停'}（バス停）` : stationTitle(f));
@@ -71,7 +72,7 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   }
 
   // ---------- 経路・距離の描画 ----------
-  const route = { active: false, from: null, to: null, mode: 'car', highway: true, main: true, picking: null, result: null };   // main: 主要道路を優先（最初からオン）
+  const route = { active: false, from: null, to: null, vias: [], mode: 'car', highway: true, main: true, picking: null, result: null };   // main: 主要道路を優先（最初からオン）
   const measure = { on: false, pts: [] };
   view.layers.push({ draw(ctx, v) {
     const line = (pts, color, w, dash) => {
@@ -89,7 +90,10 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
       }
       else line(res.pts, res.mode === 'car' ? '#2f6fcf' : '#25a06b', res.mode === 'car' ? 6 : 4.5, res.mode === 'walk' ? [2, 8] : null);
     }
-    if (route.active) for (const [p, c, t] of [[route.from, '#1f9d55', '出'], [route.to, '#e5484d', '着']]) if (p) pinMark(ctx, ...v.toScreen(...p.pt), c, t);
+    if (route.active) {
+      route.vias.forEach((p, i) => { if (p) pinMark(ctx, ...v.toScreen(...p.pt), '#e08a14', route.vias.filter(Boolean).length > 1 ? String(i + 1) : '経'); });
+      for (const [p, c, t] of [[route.from, '#1f9d55', '出'], [route.to, '#e5484d', '着']]) if (p) pinMark(ctx, ...v.toScreen(...p.pt), c, t);
+    }
     if (measure.pts.length) {
       line(measure.pts, '#e5484d', 2.5, [6, 4]);
       let tot = 0;
@@ -149,9 +153,12 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
     const info = describe(features, f, { addr: A });
     if (f.kind === 'poi' || f.kind === 'station' || f.kind === 'area' || f.kind === 'busstop') {
       const pt = featPoint(f), label = featLabel(f);
-      info.extra = h('div', { class: 'place-actions' },
+      info.extra = h('div', {}, h('div', { class: 'place-actions' },
         h('button', { class: 'btn', onclick: () => { setEnd('from', { pt, label }, false); openRoute(); } }, '出発地にする'),
-        h('button', { class: 'btn primary', onclick: () => { setEnd('to', { pt, label }, false); openRoute(); } }, 'ここへ行く'));
+        h('button', { class: 'btn', onclick: () => { addVia({ pt, label }); openRoute(); } }, '経由地にする'),
+        h('button', { class: 'btn primary', onclick: () => { setEnd('to', { pt, label }, false); openRoute(); } }, 'ここへ行く')),
+        // 駅・施設は口コミと星
+        f.kind === 'poi' || f.kind === 'station' ? reviewSection(store, f.id) : null);
     }
     place.show(info);
   }
@@ -172,6 +179,7 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
       h('div', { class: 'muted' }, `X: ${fmt(pin[0])}　Z: ${fmt(pin[1])}`),
       h('div', { class: 'pop-actions' },
         h('button', { onclick: () => { setEnd('from', { pt: w, label: pointLabel(w) }, false); openRoute(); } }, '出発'),
+        h('button', { onclick: () => { addVia({ pt: w, label: pointLabel(w) }); openRoute(); } }, '経由'),
         h('button', { onclick: () => { setEnd('to', { pt: w, label: pointLabel(w) }, false); openRoute(); } }, '到着')));
   }
   const prevVC = view.onViewChange;
@@ -306,20 +314,50 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   }
 
   // ---------- 経路検索 ----------
+  const getEnd = (which) => (which.startsWith('via') ? route.vias[+which.slice(3)] : route[which]);
   function setEnd(which, val, recalc = true) {
-    route[which] = val; route.picking = null;
+    if (which.startsWith('via')) route.vias[+which.slice(3)] = val; else route[which] = val;
+    route.picking = null;
     canvas.style.cursor = 'grab';
     if (recalc !== false || route.active) calc();
     renderRoute();
   }
+  /** 経由地を追加（空いている欄があればそこに） */
+  function addVia(val) {
+    const i = route.vias.findIndex((x) => !x);
+    if (i >= 0) route.vias[i] = val; else route.vias.push(val);
+    if (route.active) { calc(); renderRoute(); }
+  }
+  /** 出発地 → 経由地 → … → 目的地 を、区間ごとに探してつなげる */
   function calc() {
     route.result = null;
     if (route.from && route.to) {
       const t0 = performance.now();
-      route.result = route.mode === 'train' ? routeTrain(features, route.from.pt, route.to.pt) : routeRoad(features, route.mode, route.from.pt, route.to.pt, { highway: route.highway, main: route.main });
+      const stops = [route.from, ...route.vias.filter(Boolean), route.to];
+      const parts = [];
+      for (let i = 0; i < stops.length - 1; i++) {
+        const r = route.mode === 'train' ? routeTrain(features, stops[i].pt, stops[i + 1].pt) : routeRoad(features, route.mode, stops[i].pt, stops[i + 1].pt, { highway: route.highway, main: route.main });
+        if (r.error) { route.result = { error: stops.length > 2 ? `${i === 0 ? '出発地' : `経由地${i}`} → ${i === stops.length - 2 ? '目的地' : `経由地${i + 1}`}：${r.error}` : r.error }; break; }
+        parts.push(r);
+      }
+      if (!route.result) route.result = joinRoutes(parts, stops.slice(1, -1));
       route.ms = performance.now() - t0;
     }
     view.requestDraw();
+  }
+  function joinRoutes(parts, vias) {
+    if (parts.length === 1) return parts[0];
+    const out = { mode: parts[0].mode, pts: [], len: 0, time: 0, steps: [], legs: [], walkLen: 0 };
+    parts.forEach((r, i) => {
+      out.pts.push(...r.pts); out.len += r.len; out.time += r.time; out.walkLen += r.walkLen || 0;
+      if (r.steps) out.steps.push(...r.steps);
+      if (r.legs) out.legs.push(...r.legs);
+      if (i < vias.length) {
+        if (r.steps) out.steps.push({ via: true, name: vias[i].label, n: i + 1 });
+        if (r.legs) out.legs.push({ kind: 'via', label: vias[i].label, n: i + 1, pts: [] });
+      }
+    });
+    return out;
   }
   function openRoute() {
     route.active = true; layer.selected = null; layer.poiFilter = null; category = null; markChips();
@@ -327,8 +365,10 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
     calc(); renderRoute();
   }
   function endField(which) {
-    const v = route[which];
-    const inp = h('input', { type: 'text', value: v?.label || '', placeholder: which === 'from' ? '出発地を検索' : '目的地を検索', 'aria-label': which === 'from' ? '出発地' : '目的地' });
+    const v = getEnd(which);
+    const isVia = which.startsWith('via'), vi = isVia ? +which.slice(3) : -1;
+    const name = which === 'from' ? '出発地' : which === 'to' ? '目的地' : `経由地${route.vias.length > 1 ? vi + 1 : ''}`;
+    const inp = h('input', { type: 'text', value: v?.label || '', placeholder: `${name}を検索`, 'aria-label': name });
     const sug = h('div', { class: 'suggest inline', hidden: true });
     inp.addEventListener('input', () => {
       const res = searchAll(inp.value, 6).filter((r) => !['road', 'rail', 'river'].includes(r.f.kind));
@@ -336,32 +376,38 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
       sug.hidden = !res.length;
     });
     return h('div', { class: 'route-end' },
-      h('span', { class: `route-dot ${which}` }, which === 'from' ? '出' : '着'),
+      h('span', { class: `route-dot ${isVia ? 'via' : which}` }, which === 'from' ? '出' : which === 'to' ? '着' : route.vias.length > 1 ? String(vi + 1) : '経'),
       h('div', { class: 'route-in' }, inp, sug),
-      h('button', { class: `btn ${route.picking === which ? 'primary' : ''}`, title: '地図をクリックして選ぶ', onclick: () => { route.picking = route.picking === which ? null : which; canvas.style.cursor = route.picking ? 'crosshair' : 'grab'; renderRoute(); } }, icon('pin')));
+      h('button', { class: `btn ${route.picking === which ? 'primary' : ''}`, title: '地図をクリックして選ぶ', onclick: () => { route.picking = route.picking === which ? null : which; canvas.style.cursor = route.picking ? 'crosshair' : 'grab'; renderRoute(); } }, icon('pin')),
+      isVia ? h('button', { class: 'icon-btn', title: 'この経由地を外す', onclick: () => { route.vias.splice(vi, 1); if (route.picking?.startsWith('via')) route.picking = null; calc(); renderRoute(); } }, icon('x')) : null);
   }
   function renderRoute() {
     if (!route.active) return;
     const res = route.result;
     const body = [
-      h('div', { class: 'route-ends' }, endField('from'), endField('to'),
-        h('button', { class: 'icon-btn swap', title: '出発地と目的地を入れ替える', onclick: () => { [route.from, route.to] = [route.to, route.from]; calc(); renderRoute(); } }, icon('swap'))),
+      h('div', { class: 'route-ends' }, endField('from'), ...route.vias.map((_, i) => endField(`via${i}`)), endField('to'),
+        h('button', { class: 'icon-btn swap', title: '出発地と目的地を入れ替える', onclick: () => { [route.from, route.to] = [route.to, route.from]; route.vias.reverse(); calc(); renderRoute(); } }, icon('swap'))),
+      route.vias.length < 8 ? h('button', { class: 'linklike add-via', onclick: () => { route.vias.push(null); route.picking = `via${route.vias.length - 1}`; canvas.style.cursor = 'crosshair'; renderRoute(); } }, '＋ 経由地を追加') : null,
       h('div', { class: 'seg route-modes' }, ...Object.entries(MODES).map(([k, m]) => h('button', { class: route.mode === k ? 'on' : '', onclick: () => { route.mode = k; calc(); renderRoute(); } }, m.label))),
       route.mode === 'car' ? h('div', { class: 'route-opts' },
         h('label', { class: 'check', style: { margin: '8px 0 0' } }, h('input', { type: 'checkbox', checked: route.main, onchange: (e) => { route.main = e.target.checked; calc(); renderRoute(); } }), '主要道路を優先する'),
         h('label', { class: 'check', style: { margin: '4px 0 0' } }, h('input', { type: 'checkbox', checked: route.highway, onchange: (e) => { route.highway = e.target.checked; calc(); renderRoute(); } }), '高速道路を使う')) : null,
-      route.picking ? h('div', { class: 'hint', style: { marginTop: '10px' } }, `地図をクリックして${route.picking === 'from' ? '出発地' : '目的地'}を選んでください`) : null,
+      route.picking ? h('div', { class: 'hint', style: { marginTop: '10px' } }, `地図をクリックして${route.picking === 'from' ? '出発地' : route.picking === 'to' ? '目的地' : '経由地'}を選ぶか、上の欄で検索してください`) : null,
     ];
     if (!route.from || !route.to) body.push(h('p', { class: 'muted', style: { marginTop: '14px' } }, '出発地と目的地を、検索するか地図で選んでください。施設や駅の情報パネルの「ここへ行く」からも使えます。'));
     else if (res?.error) body.push(h('div', { class: 'route-err' }, res.error));
     else if (res) {
       body.push(h('div', { class: 'route-sum' }, h('b', {}, fmtTime(res.time)), h('span', {}, fmtDist(res.len)), res.mode === 'train' ? h('span', { class: 'muted' }, `うち徒歩 ${fmtDist(res.walkLen)}`) : null));
-      if (res.mode === 'train') body.push(h('ol', { class: 'legs' }, ...res.legs.map((l) => l.kind === 'rail'
+      if (res.mode === 'train') body.push(h('ol', { class: 'legs' }, ...res.legs.map((l) => l.kind === 'via'
+        ? h('li', { class: 'leg leg-via' }, h('span', { class: 'route-dot via sm' }, res.legs.filter((x) => x.kind === 'via').length > 1 ? String(l.n) : '経'), h('div', {}, h('b', {}, `経由地：${l.label}`)))
+        : l.kind === 'rail'
         ? h('li', { class: 'leg rail' }, h('span', { class: 'leg-line', style: { background: railColor(l.rail) } }), h('div', {}, h('b', {}, l.rail.name || RAIL_TYPES[l.rail.type].label), h('div', { class: 'muted' }, `${stationTitle(l.from)} → ${stationTitle(l.to)}（${l.stops}駅・${fmtDist(l.len)}）`)))
         : l.kind === 'bus' ? h('li', { class: 'leg rail' }, h('span', { class: 'leg-line', style: { background: l.bus.color || BUS_STOP_COLOR } }), h('div', {}, h('b', {}, `バス ${l.bus.name || ''}`), h('div', { class: 'muted' }, `${l.from?.name || 'バス停'} → ${l.to?.name || 'バス停'}（${l.stops}つ先・${fmtDist(l.len)}）`)))
         : l.kind === 'transfer' ? h('li', { class: 'leg' }, h('span', { class: 'leg-walk' }), h('div', { class: 'muted' }, `${stationTitle(l.from)}で乗り換え`))
         : h('li', { class: 'leg' }, h('span', { class: 'leg-walk' }), h('div', { class: 'muted' }, `徒歩 ${fmtDist(l.len)}（約${fmtTime(l.len / (MODES.walk.speed / 3.6))}）${l.to ? ` → ${hubTitle(l.to)}` : ' → 目的地'}`)))));
-      else body.push(h('ol', { class: 'legs' }, ...res.steps.slice(0, 30).map((s2) => h('li', { class: 'leg' }, h('span', { class: s2.highway ? 'leg-hw' : 'leg-road' }), h('div', {}, h('b', {}, s2.name), h('span', { class: 'muted' }, ` ${fmtDist(s2.len)}`))))));
+      else body.push(h('ol', { class: 'legs' }, ...res.steps.slice(0, 60).map((s2) => s2.via
+        ? h('li', { class: 'leg leg-via' }, h('span', { class: 'route-dot via sm' }, res.steps.filter((x) => x.via).length > 1 ? String(s2.n) : '経'), h('div', {}, h('b', {}, `経由地：${s2.name}`)))
+        : h('li', { class: 'leg' }, h('span', { class: s2.highway ? 'leg-hw' : 'leg-road' }), h('div', {}, h('b', {}, s2.name), h('span', { class: 'muted' }, ` ${fmtDist(s2.len)}`))))));
       body.push(h('p', { class: 'muted', style: { marginTop: '8px' } }, route.mode === 'train' ? '電車・バスの時間は目安です（時刻表は考えていません。乗るときの待ち時間を電車2分・バス3分として計算）。' : `時間は平均の速さ（${route.mode === 'car' ? '一般道 時速40km・高速 時速80km' : route.mode === 'walk' ? '時速4.8km' : '時速15km'}）で計算した目安です。${route.mode === 'walk' ? '' : 'カーブの多い道は速度を落として計算しています。'}${route.mode === 'car' && route.main ? '主要道路（黄色）と高速道路を優先して通ります。' : ''}`));
     }
     place.show({ title: '経路', kind: 'ルート検索', extra: h('div', { class: 'route-panel' }, ...body) });

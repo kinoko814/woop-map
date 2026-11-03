@@ -9,6 +9,7 @@ import { ICONS, ICON_KEYS, iconSvg } from '../engine/icons.js';
 import { RAIL_TYPES, railColor } from '../engine/rails.js';
 import { fmtDist } from '../engine/view.js';
 import { DAY_NAMES, defaultHours } from '../hours.js';
+import { reviewSection } from './reviews.js';
 import { SNAP, setSnap, snapActive, gridPt, angleSnap, withPerp, drawGuide } from './snap.js';
 
 const HANDLE = 9;
@@ -681,6 +682,9 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
   function renderPanel(box, which) {
     ({ building: buildingPanel, area: areaPanel, station: stationPanel, poi: poiPanel, airport: airportPanel })[which](box);
     if (which === 'building' || which === 'station' || which === 'poi' || (which === 'area' && ast.mode === 'poly')) box.append(snapRow());
+    // 選んでいる駅・施設の口コミ（編集モードでは消せる）
+    const f = sel();
+    if (f && (f.kind === 'station' || f.kind === 'poi') && (which === 'station' || which === 'poi')) box.append(reviewSection(store, f.id, { canDelete: true, compose: false }));
   }
   function snapRow() {
     return h('div', { class: 'row', style: { marginTop: '12px' } },

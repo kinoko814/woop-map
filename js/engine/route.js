@@ -5,7 +5,7 @@
 //   bike : 徒歩と同じ道（高速道路不可・一方通行は無視できる）
 //   train: 徒歩＋鉄道＋バス（駅・バス停まで道路を歩く。時刻は考えない）
 // =============================================================
-import { ROAD_TYPES, tessellate, centroid } from './roads.js';
+import { ROAD_TYPES, tessellate, centroid, inPoly } from './roads.js';
 
 export const MODES = {
   car:   { label: '車',     speed: 40, hwSpeed: 80 },   // km/h
@@ -497,6 +497,16 @@ export function routeTrain(F, from, to) {
     if (k === 'GOAL' || k === 'START') continue;
     add(k, { to: 'GOAL', len: w.len, cost: w.len / v, kind: 'walk', pts: w.pts.slice().reverse(), a: F.get(k.slice(3)) });
   }
+  // 出発地・目的地が駅（の範囲の中）やバス停そのものなら、歩かずにそのまま乗り降りする
+  //   （駅の中心から一番近い道路まで歩いて戻る時間を足さない）
+  const atHub = (pt) => {
+    const out = [];
+    for (const s of stations) if (inPoly(s.poly, pt[0], pt[1])) out.push(`st:${s.id}`);
+    for (const s of stops) if (Math.hypot(s.x - pt[0], s.z - pt[1]) < 8) out.push(`bs:${s.id}`);
+    return out;
+  };
+  for (const k of atHub(from)) add('START', { to: k, len: 0, cost: 0, kind: 'walk', pts: [from, hubPt.get(k)], b: F.get(k.slice(3)) });
+  for (const k of atHub(to)) add(k, { to: 'GOAL', len: 0, cost: 0, kind: 'walk', pts: [hubPt.get(k), to], a: F.get(k.slice(3)) });
 
   const { dist, prev } = dijkstra(adj, 'START', ['GOAL']);
   if (!dist.has('GOAL')) return { error: '電車・バスで行ける経路が見つかりません（駅・バス停と路線の設定を確認してください）' };
@@ -510,6 +520,7 @@ export function routeTrain(F, from, to) {
     if (e.kind === 'walk' && last?.kind === 'walk') { last.to = e.b; last.len += e.len; last.pts.push(...e.pts.slice(1)); continue; }
     legs.push({ kind: e.kind, line, rail: e.rail, bus: e.bus, from: e.a || null, to: e.b || null, len: e.len, stops: 1, pts: (e.sub || e.pts || []).slice() });
   }
+  for (let i = legs.length - 1; i >= 0; i--) if (legs[i].kind === 'walk' && legs[i].len < 1) legs.splice(i, 1);   // 歩かない区間は出さない
   const allPts = legs.flatMap((l) => l.pts);
   const len = edges.reduce((s, e) => s + e.len, 0);
   return { mode: 'train', legs, pts: allPts, len, time: dist.get('GOAL'), walkLen: legs.filter((l) => l.kind === 'walk').reduce((s, l) => s + l.len, 0) };
