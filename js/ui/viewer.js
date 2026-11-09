@@ -15,12 +15,12 @@ import { RoadLayer } from '../engine/roadlayer.js';
 import { inPoly, centroid, tessellate, ROAD_TYPES } from '../engine/roads.js';
 import { AREA_TYPES, viewSpan } from '../engine/shapes.js';
 import { ICONS, iconSvg } from '../engine/icons.js';
-import { RAIL_TYPES, railColor } from '../engine/rails.js';
+import { RAIL_TYPES, railColor, TRAIN_ICON_URL, sortRailsForDisplay, resolveStationCompany, resolveRailCompany } from '../engine/rails.js';
 import { ADDR_LEVELS, levelIndex } from '../engine/address.js';
 import { routeRoad, routeTrain, fmtTime, MODES } from '../engine/route.js';
 import { createPlacePanel } from './place.js';
 import { reviewSection } from './reviews.js';
-import { describe, stationTitle } from './describe.js';
+import { describe, stationTitle, describeGroupStation } from './describe.js';
 import { BUS_STOP_COLOR } from '../engine/bus.js';
 const hubTitle = (f) => (!f ? '' : f.kind === 'busstop' ? `${f.name || 'バス停'}（バス停）` : stationTitle(f));
 
@@ -45,21 +45,35 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
 
   // ---------- 骨組み ----------
   const qInput = h('input', { type: 'text', placeholder: '場所・座標（例 100,-200）を検索', 'aria-label': '場所を検索', autocomplete: 'off' });
+  const clearBtn = h('button', { class: 'icon-btn clear-btn', title: '検索を閉じる', hidden: true, onclick: () => {
+    qInput.value = '';
+    suggest.hidden = true;
+    clearBtn.hidden = true;
+    qInput.focus();
+  } }, icon('x'));
   const suggest = h('div', { class: 'suggest', hidden: true });
   const search = h('div', { class: 'v-top' },
     h('div', { class: 'v-search' },
-      h('span', { class: 'logo', title: map.name }, h('i', {}, 'W')), qInput,
+      h('span', { class: 'logo', title: map.name }, h('i', {}, 'W')),
+      qInput,
+      clearBtn,
       h('button', { class: 'icon-btn', title: '検索', onclick: () => runSearch(true) }, icon('search')),
       h('span', { class: 'v-sep' }),
       h('button', { class: 'icon-btn route-btn', title: '経路検索', onclick: () => openRoute() }, icon('route'))),
     suggest);
-  const chips = h('div', { class: 'v-chips' }, ...CATEGORIES.map(([k, l]) => h('button', { class: 'v-chip', 'data-k': k, onclick: () => toggleCategory(k) }, iconSvg(k, 18), l)));
+  const chips = h('div', { class: 'v-chips' }, ...CATEGORIES.map(([k, l]) => h('button', {
+    class: 'v-chip', 'data-k': k, type: 'button',
+    onclick: (e) => { e.currentTarget?.blur(); toggleCategory(k); }
+  }, iconSvg(k, 18), l)));
   const popup = h('div', { class: 'v-popup', hidden: true });
   const tools = h('div', { class: 'v-tools' },
     h('button', { class: 'icon-btn', id: 'measure-btn', title: '距離を測る', onclick: () => toggleMeasure() }, icon('ruler')),
     h('button', { class: 'icon-btn', title: 'この場所を共有', onclick: () => share() }, icon('share')));
   root.replaceChildren(wrap, popup);
-  const place = createPlacePanel(root, { onClose: () => { layer.selected = null; route.active = false; layer.poiFilter = null; markChips(); view.requestDraw(); } });
+  const place = createPlacePanel(root, { onClose: () => {
+    layer.selected = null; stationPin = null; route.active = false;
+    category = null; layer.poiFilter = null; markChips(); view.requestDraw();
+  } });
   root.append(search, chips, tools, coordsBox(view), zoomBox(view, { grid: false }));
   if (backToEdit) root.append(h('button', { class: 'btn v-back', onclick: backToEdit }, icon('edit'), '編集に戻る'));
   else if (toLogin) root.append(h('button', { class: 'btn v-back', onclick: toLogin }, icon('edit'), loggedIn ? '編集する' : 'ログインして編集'));
@@ -115,23 +129,55 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   } });
 
   // ---------- クリック ----------
-  let pin = null;
-  view.setTool({ pan: true, cursor: 'grab' });
+  let pin = null, stationPin = null;
+  view.setTool({ pan: true, cursor: 'default' });
   let downAt = null;
-  canvas.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
+  let pressTimer = null, longPressAt = null;
+  canvas.addEventListener('pointerdown', (e) => {
+    downAt = [e.clientX, e.clientY];
+    if (e.pointerType === 'touch') {
+      clearTimeout(pressTimer);
+      pressTimer = setTimeout(() => { longPressAt = [e.clientX, e.clientY]; showAt(e.clientX, e.clientY); }, 550);
+    }
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (downAt && Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 8) clearTimeout(pressTimer);
+  });
+  canvas.addEventListener('pointercancel', () => clearTimeout(pressTimer));
   canvas.addEventListener('pointerup', (e) => {
-    if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4) return;
+    clearTimeout(pressTimer);
+    if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4 || longPressAt) { longPressAt = null; return; }
+    if (e.button === 2) { showAt(e.clientX, e.clientY); return; }
     const r = canvas.getBoundingClientRect();
     const sx = e.clientX - r.left, sy = e.clientY - r.top;
     const w = view.toWorld(sx, sy);
     if (measure.on) { measure.pts.push(w); view.requestDraw(); return; }
     if (route.picking) { setEnd(route.picking, { pt: w, label: pointLabel(w) }); return; }
+
+    // 広域図で複数駅が統合されているマークを押した時は、代表表示ではなく検索画面強制で個別に誘導
+    const inBox = (q) => sx >= q.box[0] && sx <= q.box[2] && sy >= q.box[1] && sy <= q.box[3];
+    const hitStation = (layer.hits?.stations || []).find(inBox);
+    if (hitStation && hitStation.isGroup && hitStation.groupMembers?.length > 1) {
+      openStationSearch(hitStation.name || features.get(hitStation.id)?.name || '');
+      return;
+    }
+
     const f = hitFeature(sx, sy, w);
     if (f) return open(f);
-    place.open && !route.active && place.hide(); layer.selected = null; view.requestDraw();
+    // Blank-map coordinates are intentionally shown only by right-click or touch long-press.
+    place.open && !route.active && place.hide();
+    pin = null; stationPin = null; placePopup(); layer.selected = null; view.requestDraw();
+  });
+  canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); showAt(e.clientX, e.clientY); });
+  function showAt(clientX, clientY) {
+    const r = canvas.getBoundingClientRect();
+    const sx = clientX - r.left, sy = clientY - r.top;
+    const w = view.toWorld(sx, sy);
+    if (measure.on || route.picking) return;
+    if (hitFeature(sx, sy, w)) return;
     pin = [Math.floor(w[0]), Math.floor(w[1])];
     placePopup();
-  });
+  }
   function hitFeature(sx, sy, w) {
     const inBox = (q) => sx >= q.box[0] && sx <= q.box[2] && sy >= q.box[1] && sy <= q.box[3];
     const bus = (layer.hits?.busstops || []).find((q) => Math.hypot(q.x - sx, q.y - sy) <= q.r);
@@ -146,11 +192,45 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   }
   const featPoint = (f) => (f.x !== undefined ? [f.x, f.z] : f.poly ? centroid(f.poly) : f.seeds?.[0] || [0, 0]);
   const featLabel = (f) => (f.kind === 'station' || f.kind === 'busstop' ? hubTitle(f) : f.name || '名前なし');
+  /** 駅の会社名を取得（未設定でも路線名から推測） */
+  function stationCompany(st) {
+    return resolveStationCompany(st, features);
+  }
+
+  /** 同一駅名・同一会社名の駅リストを探す（狭域図でも会社別ページに統合するため） */
+  function findSameCompanyStations(st) {
+    const comp = stationCompany(st);
+    if (!comp) return [st];
+    const title = stationTitle(st);
+    const [cx, cz] = featPoint(st);
+    const same = [];
+    for (const other of features.ofKind('station')) {
+      if (stationTitle(other) !== title) continue;
+      if (stationCompany(other) !== comp) continue;
+      const [ox, oz] = featPoint(other);
+      const isTransfer = (st.transfers || []).includes(other.id) || (other.transfers || []).includes(st.id);
+      if (isTransfer || Math.hypot(cx - ox, cz - oz) < 1500) {
+        same.push(other);
+      }
+    }
+    return same.length ? same : [st];
+  }
+
   function open(f) {
-    pin = null; placePopup();
+    if (f.kind === 'station') {
+      const sameStations = findSameCompanyStations(f);
+      if (sameStations.length > 1) {
+        const center = groupStationCenter(sameStations);
+        const comp = stationCompany(f);
+        openGroupStation({ f, name: stationTitle(f), _groupStations: sameStations, _company: comp }, center);
+        return;
+      }
+    }
+    pin = null; stationPin = f.kind === 'station' ? featPoint(f) : null; placePopup();
     route.active = false;
+    category = null; layer.poiFilter = null; markChips();
     layer.selected = f.id; view.requestDraw();
-    const info = describe(features, f, { addr: A });
+    const info = describe(features, f, { addr: A, onOpenStation: handleTransferClick });
     if (f.kind === 'poi' || f.kind === 'station' || f.kind === 'area' || f.kind === 'busstop') {
       const pt = featPoint(f), label = featLabel(f);
       info.extra = h('div', {}, h('div', { class: 'place-actions' },
@@ -160,6 +240,44 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
         // 駅・施設は口コミと星
         f.kind === 'poi' || f.kind === 'station' ? reviewSection(store, f.id) : null);
     }
+    place.show(info);
+  }
+
+  function groupStationCenter(stationList) {
+    let totX = 0, totZ = 0;
+    for (const st of stationList) {
+      const pt = featPoint(st);
+      totX += pt[0];
+      totZ += pt[1];
+    }
+    return [totX / stationList.length, totZ / stationList.length];
+  }
+
+  function handleTransferClick(stations, company) {
+    if (!stations || !stations.length) return;
+    const same = findSameCompanyStations(stations[0]);
+    const targetStations = same.length > 1 ? same : stations;
+    const center = groupStationCenter(targetStations);
+    const comp = company || stationCompany(targetStations[0]);
+    view.setView(center[0], center[1], Math.min(view.scale, 3));
+    openGroupStation({ f: targetStations[0], name: stationTitle(targetStations[0]), _groupStations: targetStations, _company: comp }, center);
+  }
+
+  function openGroupStation(r, center) {
+    pin = null; placePopup();
+    route.active = false;
+    category = null; layer.poiFilter = null; markChips();
+    layer.selected = null;
+    stationPin = center;
+    view.requestDraw();
+    const info = describeGroupStation(features, r._groupStations, { addr: A, center, company: r._company, onOpenStation: handleTransferClick });
+    const pt = center, label = r.name;
+    info.extra = h('div', {},
+      h('div', { class: 'place-actions' },
+        h('button', { class: 'btn', onclick: () => { setEnd('from', { pt, label }, false); openRoute(); } }, '出発地にする'),
+        h('button', { class: 'btn', onclick: () => { addVia({ pt, label }); openRoute(); } }, '経由地にする'),
+        h('button', { class: 'btn primary', onclick: () => { setEnd('to', { pt, label }, false); openRoute(); } }, 'ここへ行く')),
+      reviewSection(store, r.f.id));
     place.show(info);
   }
   const pointLabel = (w) => {
@@ -185,28 +303,193 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   const prevVC = view.onViewChange;
   view.onViewChange = () => { prevVC(); placePopup(); };
 
+  /** 駅の検索用アイコン表示（同一ロゴや電車の重複を除去、国鉄優先で整列、必要なら改行してなるべく全部表示） */
+  function renderStationSearchIcons(lines, numbering) {
+    const sorted = sortRailsForDisplay(lines);
+    const seenImgs = new Set();
+    const iconParts = [];
+    for (const r of sorted) {
+      const label = r.name || RAIL_TYPES[r.type]?.label;
+      if (r.logo) {
+        if (seenImgs.has(r.logo)) continue;
+        seenImgs.add(r.logo);
+        iconParts.push(h('img', { class: 'station-logo-icon', src: r.logo, title: label, alt: '' }));
+      } else if (r.type !== 'metro') {
+        if (seenImgs.has(TRAIN_ICON_URL)) continue;
+        seenImgs.add(TRAIN_ICON_URL);
+        iconParts.push(h('img', { class: 'station-train-icon', src: TRAIN_ICON_URL, title: label, alt: '' }));
+      } else {
+        const symbol = String(r.symbol || 'M').trim().slice(0, 2);
+        iconParts.push(h('span', { class: 'station-line-number', title: `${label}${r.symbol ? `（${r.symbol}）` : ''}`, style: { background: railColor(r), fontSize: symbol.length > 1 ? '8px' : '11px' } }, symbol));
+      }
+      if (iconParts.length >= 12) break;
+    }
+    return h('span', { class: 'station-search-icons' },
+      numbering ? h('span', { class: 'station-number-tag', title: '駅ナンバリング' }, numbering) : null,
+      h('span', { class: 'station-line-icons' }, ...iconParts));
+  }
+
+  /** 駅が国鉄（JR / KR）路線を含むかどうか判定 */
+  function hasJR(r) {
+    if (!r || !r.f) return false;
+    const stList = r._groupStations || (r.f.kind === 'station' ? [r.f] : []);
+    for (const st of stList) {
+      const lines = (st.rails || []).map((id) => features.get(id)).filter(Boolean);
+      for (const l of lines) {
+        if (l.type === 'jr') return true;
+        if (l.logo && (l.logo.toLowerCase().includes('kr') || l.logo.toLowerCase().includes('jr'))) return true;
+        const comp = (l.company || '').toUpperCase();
+        if (comp.includes('KR') || comp.includes('JR') || comp.includes('国鉄')) return true;
+        const lName = (l.name || '').toUpperCase();
+        if (lName.includes('KR') || lName.includes('JR') || lName.includes('国鉄')) return true;
+      }
+      const stComp = (st.company || '').toUpperCase();
+      if (stComp.includes('KR') || stComp.includes('JR') || stComp.includes('国鉄')) return true;
+    }
+    return false;
+  }
+
+  /** 駅の表示種別テキスト（単独路線なら「会社路線名の駅」、複数なら「会社の駅」） */
+  function formatStationKind(company, lines) {
+    const comp = (company || '').trim();
+    const lineNames = lines.map((r) => r.name || RAIL_TYPES[r.type]?.label).filter(Boolean);
+    if (comp) {
+      if (lines.length === 1) {
+        const lName = lineNames[0] || '';
+        const prefix = lName.startsWith(comp) ? '' : comp;
+        return `${prefix}${lName}の駅`;
+      }
+      return `${comp}の駅`;
+    }
+    return lines.length ? `${lineNames.join('・')}の駅` : '駅';
+  }
+
   // ---------- 検索 ----------
   function searchAll(q, limit = 8) {
     q = q.trim().toLowerCase();
     if (!q) return [];
     const out = [];
     const seenRoad = new Set();
+    const qNorm = q.replace(/\s+/g, '');
+    const qBase = qNorm.replace(/駅$/, '');
+
     for (const f of features.items.values()) {
       let name = null, kind = '', iconEl = null;
       if (f.kind === 'poi') { name = f.name; kind = ICONS[f.icon]?.label; iconEl = iconSvg(f.icon, 22); }
-      else if (f.kind === 'station') { name = stationTitle(f); kind = '駅'; }
+      else if (f.kind === 'station') {
+        name = stationTitle(f);
+        const lines = (f.rails || []).map((id) => features.get(id)).filter(Boolean);
+        const companyName = stationCompany(f);
+        kind = formatStationKind(companyName, lines);
+        iconEl = renderStationSearchIcons(lines, f.numbering);
+      }
       else if (f.kind === 'busstop' && f.name) { name = f.name; kind = 'バス停'; }
       else if (f.kind === 'addr') { name = f.name; kind = ADDR_LEVELS[levelIndex(f.level)]?.label; }
       else if (f.kind === 'area' && f.name) { name = AREA_TYPES[f.type]?.outlineOnly ? `${f.name} ${f.type === 'jct' ? 'JCT' : 'IC'}` : f.name; kind = AREA_TYPES[f.type]?.label; }
       else if ((f.kind === 'road' || f.kind === 'rail' || f.kind === 'river') && f.name && !seenRoad.has(f.kind + f.name)) { seenRoad.add(f.kind + f.name); name = f.name; kind = f.kind === 'road' ? '道路' : f.kind === 'rail' ? RAIL_TYPES[f.type]?.label : '川'; }
       else if (f.kind === 'building' && f.name) { name = f.name; kind = '建物'; }
       if (!name) continue;
-      const n = name.toLowerCase(), i = n.indexOf(q);
-      if (i < 0) continue;
-      out.push({ f, name, kind, iconEl, score: (i === 0 ? 0 : 1) + n.length / 100 + (f.kind === 'poi' || f.kind === 'station' || f.kind === 'busstop' ? 0 : 0.3) });
+
+      let matchIdx = -1;
+      let nLen = name.length;
+      if (f.kind === 'station') {
+        const tNorm = name.toLowerCase().replace(/\s+/g, '');
+        const rawNameNorm = (f.name || '').toLowerCase().replace(/\s+/g, '').replace(/駅$/, '');
+        const numNorm = (f.numbering || '').toLowerCase().replace(/\s+/g, '');
+        const isExact = rawNameNorm === qBase || tNorm === qNorm || tNorm === qBase + '駅';
+        if (isExact) {
+          matchIdx = 0;
+        } else if (qNorm.endsWith('駅')) {
+          if (tNorm.startsWith(qNorm)) matchIdx = 0;
+          else if (tNorm.includes(qNorm)) matchIdx = tNorm.indexOf(qNorm);
+        } else {
+          if (tNorm.startsWith(qBase) || rawNameNorm.startsWith(qBase)) matchIdx = 0;
+          else if (tNorm.includes(qBase) || rawNameNorm.includes(qBase)) matchIdx = 1;
+        }
+        if (matchIdx < 0 && numNorm && numNorm.includes(qNorm)) matchIdx = 0;
+      } else {
+        const n = name.toLowerCase();
+        if (n.includes(q)) matchIdx = n.indexOf(q);
+      }
+      if (matchIdx < 0) continue;
+
+      out.push({
+        f, name, kind, iconEl,
+        score: (matchIdx === 0 ? 0 : 1) + nLen / 100 + (f.kind === 'poi' || f.kind === 'station' || f.kind === 'busstop' ? 0 : 0.3)
+      });
     }
-    return out.sort((a, b) => a.score - b.score).slice(0, limit);
+    return groupStationResults(out.sort((a, b) => a.score - b.score), limit, { qNorm, qBase });
   }
+
+  /** 同じ会社名・同じ駅名の駅を1件にまとめる */
+  function groupStationResults(results, limit = 8, { qNorm = '', qBase = '' } = {}) {
+    const groups = new Map();
+    const ordered = [];
+
+    for (const r of results) {
+      if (r.f.kind !== 'station') { ordered.push(r); continue; }
+      const lines = (r.f.rails || []).map((id) => features.get(id)).filter(Boolean);
+      const company = stationCompany(r.f);
+      if (!company) { ordered.push(r); continue; }
+      const key = `${stationTitle(r.f)}\0${company}`;
+      if (!groups.has(key)) {
+        const g = { base: r, company, stationList: [r.f], lineIds: new Set(lines.map((l) => l.id)), lines: [...lines], insertIdx: ordered.length };
+        groups.set(key, g);
+        ordered.push(null); // プレースホルダ
+      } else {
+        const g = groups.get(key);
+        g.stationList.push(r.f);
+        for (const l of lines) if (!g.lineIds.has(l.id)) { g.lineIds.add(l.id); g.lines.push(l); }
+      }
+    }
+
+    for (const g of groups.values()) {
+      const { base, company, lines } = g;
+      const kind = formatStationKind(company, lines);
+      const iconEl = renderStationSearchIcons(lines, base.f.numbering);
+      ordered[g.insertIdx] = { ...base, kind, iconEl, _groupStations: g.stationList, _company: company };
+    }
+
+    const finalResults = ordered.filter(Boolean);
+
+    // 完全一致駅（「川島駅」に対する川島駅各社など）の判定
+    const isExactStation = (r) => {
+      if (r.f.kind !== 'station') return false;
+      const raw = (r.f.name || '').trim().toLowerCase().replace(/\s+/g, '').replace(/駅$/, '');
+      const t = (r.name || '').trim().toLowerCase().replace(/\s+/g, '');
+      return raw === qBase || t === qNorm || t === qBase + '駅';
+    };
+
+    const exactStations = finalResults.filter(isExactStation);
+    if (exactStations.length > 0) {
+      // 完全一致する各社の駅を最優先（国鉄(KR)がある社を一番上に）
+      exactStations.sort((a, b) => {
+        const aJR = hasJR(a) ? 1 : 0;
+        const bJR = hasJR(b) ? 1 : 0;
+        if (aJR !== bJR) return bJR - aJR;
+        return a.score - b.score;
+      });
+
+      // 他の候補（施設など）を後ろに配置。検索語が「〜駅」の場合は完全一致以外の駅（川島望通駅等）は完全に除外！
+      const others = finalResults.filter((r) => !isExactStation(r));
+      const filteredOthers = qNorm.endsWith('駅')
+        ? others.filter((r) => r.f.kind !== 'station')
+        : others;
+
+      return [...exactStations, ...filteredOthers].slice(0, limit);
+    }
+
+    // 完全一致駅がない通常検索の場合
+    finalResults.sort((a, b) => {
+      const aJR = hasJR(a) ? 1 : 0;
+      const bJR = hasJR(b) ? 1 : 0;
+      if (aJR !== bJR) return bJR - aJR; // 国鉄(KR)がある方を優先
+      return a.score - b.score;
+    });
+
+    return finalResults.slice(0, limit);
+  }
+
   function resultRow(r, onPick) {
     const pt = r.f.kind === 'road' || r.f.kind === 'rail' || r.f.kind === 'river' ? null : featPoint(r.f);
     return h('button', { class: 'sug-item', onclick: () => onPick(r) },
@@ -240,6 +523,7 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
     placePopup(); view.requestDraw();
   }
   function runSearch(enter) {
+    clearBtn.hidden = !qInput.value;
     const xz = parseCoord(qInput.value);
     if (xz) {
       if (enter) return goCoord(xz);
@@ -250,19 +534,49 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
     }
     const res = searchAll(qInput.value);
     if (enter && res[0]) { pickResult(res[0]); return; }
-    suggest.replaceChildren(...res.map((r) => resultRow(r, pickResult)));
+    if (res.length) {
+      const items = res.map((r) => resultRow(r, pickResult));
+      const closeItem = h('button', { class: 'sug-item', style: { justifyContent: 'center', color: 'var(--ink-3)', fontSize: '13px' }, onclick: () => { suggest.hidden = true; } },
+        h('span', { class: 'sug-ic' }, icon('x')),
+        h('span', {}, '検索結果を閉じる'));
+      suggest.replaceChildren(...items, closeItem);
+    } else {
+      suggest.replaceChildren();
+    }
     suggest.hidden = !res.length;
     if (enter && !res.length) toast('見つかりませんでした');
   }
+  /** 広域駅マークをクリックした時に検索を開いて個別に誘導 */
+  function openStationSearch(name) {
+    if (!name) return;
+    place.open && !route.active && place.hide();
+    layer.selected = null;
+    stationPin = null;
+    category = null; layer.poiFilter = null; markChips();
+    view.requestDraw();
+    const query = name.endsWith('駅') ? name : `${name}駅`;
+    qInput.value = query;
+    clearBtn.hidden = false;
+    runSearch(false);
+    qInput.focus();
+    suggest.scrollTop = 0;
+  }
   function pickResult(r) {
-    suggest.hidden = true; qInput.value = r.name;
+    suggest.hidden = true; qInput.value = r.name; clearBtn.hidden = false;
+    if (r.f.kind === 'station' && r._groupStations?.length > 1) {
+      const center = groupStationCenter(r._groupStations);
+      view.setView(center[0], center[1], Math.min(view.scale, 3));
+      openGroupStation(r, center);
+      return;
+    }
     flyTo(r.f);
     if (r.f.kind === 'road' || r.f.kind === 'rail' || r.f.kind === 'river') return;
+    if (r.f.kind === 'station') stationPin = featPoint(r.f);
     open(r.f);
   }
-  qInput.addEventListener('input', () => runSearch(false));
-  qInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(true); if (e.key === 'Escape') suggest.hidden = true; });
-  qInput.addEventListener('focus', () => runSearch(false));
+  qInput.addEventListener('input', () => { clearBtn.hidden = !qInput.value; runSearch(false); });
+  qInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(true); if (e.key === 'Escape') { suggest.hidden = true; } });
+  qInput.addEventListener('focus', () => { clearBtn.hidden = !qInput.value; runSearch(false); });
 
   // ---------- カテゴリのショートカット ----------
   let category = null;
@@ -290,11 +604,81 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   function toggleMeasure() {
     measure.on = !measure.on; measure.pts = [];
     document.getElementById('measure-btn').classList.toggle('on', measure.on);
-    canvas.style.cursor = measure.on ? 'crosshair' : 'grab';
+    canvas.style.cursor = measure.on ? 'crosshair' : 'default';
     toast(measure.on ? '地図をクリックして測りたい点を順に置いてください（もう一度ボタンで終了）' : '距離の計測を終えました');
     view.requestDraw();
   }
-  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && measure.on) toggleMeasure(); if (e.key === 'Backspace' && measure.on && e.target === document.body) { measure.pts.pop(); view.requestDraw(); } });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      let handled = false;
+      // 1. サジェストが開いていたら閉じる
+      if (!suggest.hidden) {
+        suggest.hidden = true;
+        handled = true;
+      }
+      // 2. 検索バーに入力があればクリア＆フォーカス解除
+      if (qInput.value) {
+        qInput.value = '';
+        clearBtn.hidden = true;
+        qInput.blur();
+        handled = true;
+      }
+      // 3. 距離計測中なら終了
+      if (measure.on) {
+        toggleMeasure();
+        handled = true;
+      }
+      // 4. 経路検索の地点選択中なら解除
+      if (route.picking) {
+        route.picking = null;
+        canvas.style.cursor = 'default';
+        renderRoute();
+        handled = true;
+      }
+      // 5. 詳細パネルが開いていたら閉じる
+      if (place.open) {
+        place.hide();
+        category = null;
+        layer.poiFilter = null;
+        markChips();
+        handled = true;
+      }
+      // 6. 座標ポップアップが開いていたら閉じる
+      if (!popup.hidden) {
+        popup.hidden = true;
+        handled = true;
+      }
+      // 7. ピンや選択状態があれば解除
+      if (pin || stationPin || layer.selected) {
+        pin = null;
+        stationPin = null;
+        layer.selected = null;
+        view.requestDraw();
+        handled = true;
+      }
+      // 8. カテゴリ選択が残っていれば解除
+      if (category || layer.poiFilter) {
+        category = null;
+        layer.poiFilter = null;
+        markChips();
+        view.requestDraw();
+        handled = true;
+      }
+      // フォーカスが残ってボタンが誤押下されるのを防止
+      if (document.activeElement && document.activeElement !== document.body) {
+        document.activeElement.blur();
+      }
+      canvas.focus?.({ preventScroll: true });
+      if (handled) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }
+    if (e.key === 'Backspace' && measure.on && e.target === document.body) {
+      measure.pts.pop();
+      view.requestDraw();
+    }
+  });
 
   // ---------- 共有 ----------
   function shareUrl() {
@@ -318,7 +702,7 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
   function setEnd(which, val, recalc = true) {
     if (which.startsWith('via')) route.vias[+which.slice(3)] = val; else route[which] = val;
     route.picking = null;
-    canvas.style.cursor = 'grab';
+    canvas.style.cursor = 'default';
     if (recalc !== false || route.active) calc();
     renderRoute();
   }
@@ -413,15 +797,36 @@ export async function startViewer(root, store, { backToEdit, toLogin, loggedIn }
     place.show({ title: '経路', kind: 'ルート検索', extra: h('div', { class: 'route-panel' }, ...body) });
   }
 
-  // ---------- 読み込み ----------
+  // ---------- 読み込み（プログレッシブ高速化） ----------
   toast('マップを読み込み中…', 0);
   try {
-    const rows = await store.loadTerrainMeta();
-    applyRows(terrain, new Map(), rows);
     terrain.loader = (keys) => store.loadTerrainData(keys);
-    features.load(await store.listFeatures());
-    hideToast();
-    view.resetCache();
+
+    let terrainDone = false, featDone = false;
+    const checkHideToast = () => { if (terrainDone && featDone) hideToast(); };
+
+    // 地形メタデータの読み込み（到着したら即座に描画開始）
+    const pTerrain = store.loadTerrainMeta().then((rows) => {
+      applyRows(terrain, new Map(), rows);
+      view.resetCache();
+      view.requestDraw();
+      terrainDone = true;
+      checkHideToast();
+      return rows;
+    });
+
+    // フィーチャー（駅・道路・線路など）の読み込み（到着したら即座に反映）
+    const pFeatures = store.listFeatures().then((featureRows) => {
+      features.load(featureRows);
+      view.resetCache();
+      view.requestDraw();
+      featDone = true;
+      checkHideToast();
+      return featureRows;
+    });
+
+    await Promise.all([pTerrain, pFeatures]);
+
     // 共有リンクの位置と選択
     const q = new URLSearchParams(location.search);
     const at = q.get('at')?.split(',').map(Number);

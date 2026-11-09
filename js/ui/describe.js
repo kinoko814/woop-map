@@ -3,7 +3,7 @@
 // =============================================================
 import { h } from './dom.js';
 import { ROAD_TYPES, ROAD_COLORS, inPoly, centroid, tessellate } from '../engine/roads.js';
-import { RAIL_TYPES, railColor } from '../engine/rails.js';
+import { RAIL_TYPES, railColor, TRAIN_ICON_URL, resolveStationCompany, sortRailsForDisplay } from '../engine/rails.js';
 import { AREA_TYPES } from '../engine/shapes.js';
 import { ICONS, iconSvg } from '../engine/icons.js';
 import { DAY_NAMES, isOpenNow } from '../hours.js';
@@ -19,7 +19,7 @@ export function describe(F, f, opts = {}) {
   if (f.kind === 'addr') return describeAddr(F, f);
   if (f.kind === 'area' && AREA_TYPES[f.type]?.outlineOnly) return describeArea(F, f);
   if (f.kind === 'area') return describeZone(F, f);
-  if (f.kind === 'station') return describeStation(F, f);
+  if (f.kind === 'station') return describeStation(F, f, opts);
   if (f.kind === 'poi') return describePoi(F, f);
   if (f.kind === 'busstop') return describeBusStop(F, f);
   return { title: f.name || '名前なし', kind: '', rows: [] };
@@ -90,30 +90,167 @@ function darkerOf(hex = '#cccccc') {
   return `rgb(${f(n >> 16)},${f((n >> 8) & 255)},${f(n & 255)})`;
 }
 
-const railChip = (r) => h('span', { class: 'chipline' },
-  h('i', { style: { background: railColor(r) } }, r.type === 'metro' ? (r.symbol || r.name || 'M').slice(0, 2) : r.type === 'jr' ? '国' : '私'),
-  r.name || RAIL_TYPES[r.type].label);
-export const stationTitle = (st) => (!st.name ? '名前なしの駅' : st.name.endsWith('駅') ? st.name : `${st.name}駅`);
+function railChipIcon(r) {
+  if (r.logo) return h('img', { class: 'chip-logo', src: r.logo, alt: '' });
+  if (r.type !== 'metro') return h('img', { class: 'chip-train-icon', src: TRAIN_ICON_URL, alt: '' });
+  const sym = String(r.symbol || r.name || 'M').trim().slice(0, 2);
+  return h('i', { style: { background: railColor(r) } }, sym);
+}
 
-function describeStation(F, st) {
+const railChip = (r) => h('span', { class: 'chipline' },
+  railChipIcon(r),
+  r.name || RAIL_TYPES[r.type].label);
+export const stationTitle = (st) => {
+  const n = (st.name || '').trim();
+  if (!n) return '名前なしの駅';
+  return n.endsWith('駅') ? n : `${n}駅`;
+};
+
+/** 乗換駅リストを会社名×駅名ごとにまとめ、クリック可能にする */
+function renderTransferChips(F, transferStationList, onOpenStation) {
+  const groups = new Map();
+  for (const o of transferStationList) {
+    if (!o) continue;
+    const comp = resolveStationCompany(o, F);
+    const title = stationTitle(o);
+    const key = `${title}\0${comp}`;
+    if (!groups.has(key)) {
+      groups.set(key, { title, company: comp, stations: [], railIds: new Set() });
+    }
+    const g = groups.get(key);
+    g.stations.push(o);
+    for (const rid of o.rails || []) {
+      g.railIds.add(rid);
+    }
+  }
+
+  const chips = [];
+  for (const g of groups.values()) {
+    const rails = [...g.railIds].map((id) => F.get(id)).filter(Boolean);
+    const sortedRails = sortRailsForDisplay(rails);
+    const seenImgs = new Set();
+    const dedupedRails = [];
+    for (const r of sortedRails) {
+      if (r.logo) {
+        if (seenImgs.has(r.logo)) continue;
+        seenImgs.add(r.logo);
+        dedupedRails.push(r);
+      } else if (r.type !== 'metro') {
+        if (seenImgs.has('__train__')) continue;
+        seenImgs.add('__train__');
+        dedupedRails.push(r);
+      } else {
+        dedupedRails.push(r);
+      }
+    }
+    const icons = dedupedRails.slice(0, 6).map(railChipIcon);
+
+    const tag = onOpenStation ? 'button' : 'span';
+    const props = {
+      class: `chipline${onOpenStation ? ' transfer-btn' : ''}`,
+      title: g.company ? `${g.company} ${g.title}` : g.title,
+    };
+    if (onOpenStation) {
+      props.type = 'button';
+      props.onclick = (e) => {
+        e.preventDefault();
+        onOpenStation(g.stations, g.company);
+      };
+    }
+
+    chips.push(h(tag, props, ...icons, g.title));
+  }
+
+  return chips;
+}
+
+function describeStation(F, st, opts = {}) {
   const rails = (st.rails || []).map((id) => F.get(id)).filter(Boolean);
+  // 駅の所属会社は乗り入れる路線から自動取得
+  const company = resolveStationCompany(st, F);
   const transfers = (st.transfers || []).map((id) => F.get(id)).filter(Boolean);
-  const tChips = transfers.map((o) => h('span', { class: 'chipline' },
-    ...((o.rails || []).map((id) => F.get(id)).filter(Boolean).slice(0, 3).map((r) => h('i', { style: { background: railColor(r) } }, r.type === 'metro' ? (r.symbol || r.name || 'M').slice(0, 2) : '駅'))),
-    stationTitle(o)));
+  const tChips = renderTransferChips(F, transfers, opts.onOpenStation);
   const exits = (st.exits || []).map((e) => h('span', { class: 'exit-badge' }, e.label));
   const [cx, cz] = centroid(st.poly);
   return {
-    title: stationTitle(st), kind: '駅', kindColor: '#2f6fcf', photo: st.photo,
+    title: stationTitle(st), kind: company ? `${company}の駅` : '駅', kindColor: '#2f6fcf', photo: st.photo,
     badges: rails.map(railChip),
     desc: st.desc,
     rows: [
-      ['路線', rails.length ? rails.map((r) => `${r.name || RAIL_TYPES[r.type].label}（${RAIL_TYPES[r.type].label}）`).join('、') : null],
+      ['会社名', company || null],
+      ['駅ナンバリング', st.numbering],
+      ['路線', rails.length ? [...new Set(rails.map((r) => r.name || RAIL_TYPES[r.type]?.label).filter(Boolean))].join('、') : null],
       ['乗換', tChips.length ? tChips : null],
       ['出口', exits.length ? exits : null],
       ['住所', autoAddr(st, cx, cz)],
       ['電話番号', st.phone],
       ['リンク', linksView(st.links)],
+      ['座標', fmtXZ(cx, cz)],
+    ],
+  };
+}
+
+/** 同じ会社・同じ駅名の複数駅を統合した情報パネル内容を作る */
+export function describeGroupStation(F, stationList, { addr, center, company, onOpenStation } = {}) {
+  ADDR = addr || null;
+  const rep = stationList[0];
+  const [cx, cz] = center || (rep.poly?.length ? centroid(rep.poly) : [rep.x, rep.z]);
+
+  const railMap = new Map();
+  for (const st of stationList) {
+    for (const rid of st.rails || []) {
+      const r = F.get(rid);
+      if (r && !railMap.has(r.id)) railMap.set(r.id, r);
+    }
+  }
+  const rails = [...railMap.values()];
+
+  const memberIds = new Set(stationList.map((s) => s.id));
+  const transferMap = new Map();
+  for (const st of stationList) {
+    for (const tid of st.transfers || []) {
+      if (memberIds.has(tid)) continue;
+      const o = F.get(tid);
+      if (o && !transferMap.has(o.id)) transferMap.set(o.id, o);
+    }
+  }
+  const transfers = [...transferMap.values()];
+  const tChips = renderTransferChips(F, transfers, onOpenStation);
+
+  const exitMap = new Map();
+  for (const st of stationList) {
+    for (const ex of st.exits || []) {
+      if (ex && !exitMap.has(ex.label)) exitMap.set(ex.label, ex);
+    }
+  }
+  const exits = [...exitMap.values()].map((e) => h('span', { class: 'exit-badge' }, e.label));
+
+  const numList = [...new Set(stationList.map((s) => s.numbering).filter(Boolean))];
+  const photo = stationList.map((s) => s.photo).find(Boolean);
+  const desc = stationList.map((s) => s.desc).filter(Boolean).join('\n\n');
+  const phone = stationList.map((s) => s.phone).find(Boolean);
+  const links = stationList.flatMap((s) => s.links || []).filter(Boolean);
+
+  // 駅の所属会社は乗り入れる路線から自動取得
+  const comp = company || resolveStationCompany(stationList, F);
+  const kind = comp ? `${comp}の駅` : '駅';
+
+  return {
+    title: stationTitle(rep),
+    kind,
+    kindColor: '#2f6fcf',
+    photo,
+    badges: rails.map(railChip),
+    desc,
+    rows: [
+      ['会社名', comp || null],
+      ['駅ナンバリング', numList.length ? numList.join('、') : null],
+      ['路線', rails.length ? [...new Set(rails.map((r) => r.name || RAIL_TYPES[r.type]?.label).filter(Boolean))].join('、') : null],
+      ['乗換', tChips.length ? tChips : null],
+      ['出口', exits.length ? exits : null],
+      ['住所', autoAddr(rep, cx, cz)],
+      ['電話番号', phone],
+      ['リンク', linksView(links)],
       ['座標', fmtXZ(cx, cz)],
     ],
   };

@@ -635,6 +635,7 @@ export function createShapeTools({ view, F, session, layer, refreshPanel, store,
     parts.push(
       field('st-name', '駅名', text('st-name', f.name, '例：中央', (v) => patch(f.id, (g) => { g.name = v; }))),
       h('div', { class: 'row' }, h('label', { class: 'lbl' }, '路線（近い順・ほかの路線も止まる駅ならチェック）'), near.length ? railList : h('div', { class: 'muted' }, '線路がまだありません。')),
+      field('st-numbering', '駅ナンバリング', text('st-numbering', f.numbering, '例：JR-Y01、T01', (v) => patch(f.id, (g) => { g.numbering = v.trim(); }))),
       field('st-desc', '駅の概要', text('st-desc', f.desc, '例：1日の乗降客数は約5万人。北口にバスターミナル。', (v) => patch(f.id, (g) => { g.desc = v; }), 3)),
       field('st-addr', '住所（空欄なら境界から自動）', text('st-addr', f.address, layer.addr.addressText(...centroid(f.poly)) || '住所ツールで地名を付けると自動で入ります', (v) => patch(f.id, (g) => { g.address = v; }))),
       linksField(f),

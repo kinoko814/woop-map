@@ -19,8 +19,10 @@ const FONT = '"Noto Sans JP", system-ui, sans-serif';
 
 /** 縮尺バーの表示が 200m になる境目（1px あたり約3.3m）。これより縮小するとアイコン類を隠す */
 export const ICON_MPP = 200 / 60;
-/** 駅のマークを出す縮尺（1px あたりのメートル）。ほかのアイコンより広く */
-export const STATION_MPP = 8;
+/** 駅のマークを出す縮尺。超広域では乗換駅などを優先して間引く */
+export const STATION_MPP = 500;
+/** 交差点名を表示する縮尺（画面幅200m相当以内） */
+export const JUNCTION_LABEL_MPP = 200 / 60;
 
 export class RoadLayer {
   constructor(view, F) {
@@ -111,7 +113,7 @@ export class RoadLayer {
     const taken = [];
     this.hits = { stations: [], pois: [], areas: [] };
     const icons = mpp < ICON_MPP;
-    // 駅は、ほかのアイコンより縮小しても出す（画面の幅 10km くらいまで）
+    // 駅は超広域まで表示し、駅マーク側で乗換駅を優先して間引く
     if (mpp < STATION_MPP) this.hits.stations = drawStationMarks(ctx, v, lists.station, F, { onImage: () => v.requestDraw(), selectedId: sel, taken });
     // バス停（路線を表示中なら、その停留所は少し縮小していても出す）
     const stopsToDraw = icons || this.busAll ? lists.busstop : lists.busstop.filter((b) => busHl.has(b.id) || b.id === sel);
@@ -351,7 +353,24 @@ export function drawRoadItems(ctx, v, items, F, getNode, opts = {}) {
   }
   ctx.lineCap = 'round';
   // 信号
-  if (mpp < Math.min(2.5, ICON_MPP)) for (const n of junctions) if (n.signal) signal(ctx, ...v.toScreen(n.x, n.z));
+  // ・200m 以内         ：全信号を通常サイズ
+  // ・200m 超〜駅表示限界：主要道路（黄・橙）上の信号のみ小さく（超広域でも表示）
+  if (mpp < STATION_MPP) {
+    for (const n of junctions) {
+      if (!n.signal) continue;
+      if (mpp >= JUNCTION_LABEL_MPP) {
+        // 200m より広い縮尺：主要道路（color=yellow / orange）の交差点のみ、小アイコン
+        const isMajor = F && [...F.roadsOf(n.id)].some((rid) => {
+          const r = F.get(rid);
+          return r?.color === 'yellow' || r?.color === 'orange';
+        });
+        if (isMajor) signal(ctx, ...v.toScreen(n.x, n.z), true);
+      } else {
+        // 200m 以内：全信号を通常サイズ
+        signal(ctx, ...v.toScreen(n.x, n.z), false);
+      }
+    }
+  }
   // 名前
   const segItems = [];
   for (const it of items) if (it.road.name) it.g.segs.forEach((pts) => segItems.push({ road: it.road, pts }));
@@ -534,19 +553,22 @@ function arrows(ctx, v, pts, wpx, color) {
   }
   ctx.restore();
 }
-function signal(ctx, x, y) {
+function signal(ctx, x, y, small = false) {
   ctx.save();
-  ctx.translate(x + 10, y - 16);
-  ctx.fillStyle = '#2b3138'; roundRect(ctx, -10, -5, 20, 10, 3); ctx.fill();
-  [['#4ccf7a', -5.5], ['#f3c53f', 0], ['#ef5350', 5.5]].forEach(([c, dx]) => { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(dx, 0, 2.4, 0, Math.PI * 2); ctx.fill(); });
+  // Keep the signal body centered on the junction node itself.
+  ctx.translate(x, y);
+  const s = small ? 0.6 : 1;   // 縮小版は60%サイズ
+  ctx.globalAlpha = small ? 0.78 : 1;
+  ctx.fillStyle = '#2b3138'; roundRect(ctx, -10 * s, -5 * s, 20 * s, 10 * s, 3); ctx.fill();
+  [['#4ccf7a', -5.5 * s], ['#f3c53f', 0], ['#ef5350', 5.5 * s]].forEach(([c, dx]) => { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(dx, 0, 2.4 * s, 0, Math.PI * 2); ctx.fill(); });
   ctx.restore();
 }
 function labels(ctx, v, runs, junctions, taken) {   // runs = [{road, pts}]（区間ごと）
   const mpp = v.mpp;
   const free = (r) => { for (const t of taken) if (r[0] < t[2] && r[2] > t[0] && r[1] < t[3] && r[3] > t[1]) return false; taken.push(r); return true; };
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  // 交差点名
-  if (mpp < ICON_MPP) {
+  // 交差点名（縮尺バー200m以内で表示）
+  if (mpp < JUNCTION_LABEL_MPP) {
     ctx.font = `600 11px ${FONT}`;
     for (const n of junctions) {
       if (!n.name) continue;
