@@ -117,6 +117,17 @@ export function drawStationShapes(ctx, v, stations, F, selectedId) {
   ctx.restore();
 }
 
+/** デフォルト電車グリフをCanvasに直接描画（PNG不要） */
+function trainGlyph(ctx, x, y, s) {
+  ctx.save(); ctx.translate(x - s / 2, y - s / 2); ctx.scale(s / 24, s / 24);
+  ctx.fillStyle = '#fff';
+  roundRect(ctx, 5, 2, 14, 16, 4); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(7.5, 5, 9, 5);
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(8.5, 14, 1.4, 0, 7); ctx.arc(15.5, 14, 1.4, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(8, 18); ctx.lineTo(5, 22); ctx.moveTo(16, 18); ctx.lineTo(19, 22); ctx.stroke();
+  ctx.restore();
+}
+
 const logoCache = new Map();
 function logoImg(src, onload) {
   if (!src) return null;
@@ -371,9 +382,9 @@ export function drawStationMarks(ctx, v, stations, F, { onImage, selectedId, tak
       const cy = startY + rIdx * rowH + S / 2;
       let mx = startX;
       for (const r of row) {
-        const im = r.logo ? logoImg(r.logo, onImage) : r.type !== 'metro' ? logoImg(TRAIN_ICON_URL, onImage) : null;
+        const im = r.logo ? logoImg(r.logo, onImage) : null;
         if (im) {
-          if (r.logo) { ctx.fillStyle = '#fff'; roundRect(ctx, mx - 1, cy - S / 2 - 1, S + 2, S + 2, 4); ctx.fill(); }
+          ctx.fillStyle = '#fff'; roundRect(ctx, mx - 1, cy - S / 2 - 1, S + 2, S + 2, 4); ctx.fill();
           ctx.drawImage(im, mx, cy - S / 2, S, S);
         } else if (r.type === 'metro') {
           ctx.fillStyle = railColor(r); ctx.beginPath(); ctx.arc(mx + S / 2, cy, S / 2, 0, Math.PI * 2); ctx.fill();
@@ -382,8 +393,9 @@ export function drawStationMarks(ctx, v, stations, F, { onImage, selectedId, tak
           ctx.fillStyle = '#fff'; ctx.font = `800 ${sym.length > 1 ? S * 0.45 : S * 0.6}px ${FONT}`; ctx.textAlign = 'center';
           ctx.fillText(sym, mx + S / 2, cy + 0.5);
         } else {
-          ctx.fillStyle = '#000';
-          roundRect(ctx, mx, cy - S / 2, S, S, 3); ctx.fill();
+          ctx.fillStyle = r.type === 'private' ? '#5a6370' : '#2f6fcf';
+          roundRect(ctx, mx, cy - S / 2, S, S, 4); ctx.fill();
+          trainGlyph(ctx, mx + S / 2, cy, S * 0.62);
         }
         mx += S + gap;
       }
