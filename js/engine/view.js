@@ -284,7 +284,8 @@ export class MapView {
       e.preventDefault();
       const p = local(e);
       const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
-      this.zoomAt(p[0], p[1], Math.exp(-dy * 0.0015));
+      // Treat each wheel notch as one map zoom level, regardless of browser delta units.
+      this.zoomAt(p[0], p[1], dy < 0 ? 2 : 0.5);
     }, { passive: false });
   }
   setTool(tool) {

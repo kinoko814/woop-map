@@ -95,15 +95,26 @@ export class RemoteStore {
   // ---- 地形 ----
   // lv1 = スーパーチャンクの代表値、lv0 = 個別チャンク（本データ data は必要な時だけ取得）
   async loadTerrainMeta(onProgress = () => {}) {
-    const rows = [];
     const PAGE = 1000;
-    for (let from = 0; ; from += PAGE) {
-      const { data, error } = await this.sb.from('terrain_chunks').select('lv,cx,cz,u,pv')
-        .eq('map_id', this.mapId).order('lv').order('cx').order('cz').range(from, from + PAGE - 1);
-      if (error) throw error;
-      rows.push(...data);
+    const first = await this.sb.from('terrain_chunks').select('lv,cx,cz,u,pv', { count: 'exact' })
+      .eq('map_id', this.mapId).order('lv').order('cx').order('cz').range(0, PAGE - 1);
+    if (first.error) throw first.error;
+    const rows = [...first.data];
+    onProgress(rows.length);
+    const total = first.count || first.data.length;
+    if (total <= PAGE) return rows;
+
+    // 2ページ目以降を4本並列で一括取得（通信ラウンドトリップを大幅削減）
+    const ranges = [];
+    for (let from = PAGE; from < total; from += PAGE) ranges.push([from, from + PAGE - 1]);
+    for (let i = 0; i < ranges.length; i += 4) {
+      const batch = ranges.slice(i, i + 4);
+      const res = await Promise.all(batch.map(([f, t]) =>
+        this.sb.from('terrain_chunks').select('lv,cx,cz,u,pv')
+          .eq('map_id', this.mapId).order('lv').order('cx').order('cz').range(f, t)
+      ));
+      for (const { data, error } of res) { if (error) throw error; rows.push(...data); }
       onProgress(rows.length);
-      if (data.length < PAGE) break;
     }
     return rows;
   }
@@ -161,13 +172,24 @@ export class RemoteStore {
 
   // ---- 図形（道路・交差点など） ----
   async listFeatures() {
-    const rows = [];
-    for (let from = 0; ; from += 1000) {
-      const { data, error } = await this.sb.from('features').select('id,kind,data')
-        .eq('map_id', this.mapId).order('id').range(from, from + 999);
-      if (error) throw error;
-      rows.push(...data);
-      if (data.length < 1000) break;
+    const PAGE = 1000;
+    const first = await this.sb.from('features').select('id,kind,data', { count: 'exact' })
+      .eq('map_id', this.mapId).order('id').range(0, PAGE - 1);
+    if (first.error) throw first.error;
+    const rows = [...first.data];
+    const total = first.count || first.data.length;
+    if (total <= PAGE) return rows;
+
+    // 2ページ目以降を4本並列で一括取得
+    const ranges = [];
+    for (let from = PAGE; from < total; from += PAGE) ranges.push([from, from + PAGE - 1]);
+    for (let i = 0; i < ranges.length; i += 4) {
+      const batch = ranges.slice(i, i + 4);
+      const res = await Promise.all(batch.map(([f, t]) =>
+        this.sb.from('features').select('id,kind,data')
+          .eq('map_id', this.mapId).order('id').range(f, t)
+      ));
+      for (const { data, error } of res) { if (error) throw error; rows.push(...data); }
     }
     return rows;
   }

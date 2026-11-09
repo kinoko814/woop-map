@@ -753,24 +753,25 @@ export function createRoadTools({ view, F, session, layer, refreshPanel, kind = 
     }
     const upd = (fn) => commit((tx) => fn(tx.edit(rail.id)));
     const name = h('input', { type: 'text', id: 'rail-name', value: rail.name || '', placeholder: rail.type === 'metro' ? '例：港北線' : '例：東海道本線', onchange: () => upd((r) => { r.name = name.value.trim(); }) });
+    const company = h('input', { type: 'text', id: 'rail-company', value: rail.company || '', placeholder: '例：東日本旅客鉄道', onchange: () => upd((r) => { r.company = company.value.trim(); }) });
     parts.push(
       h('div', { class: 'row' }, h('label', { class: 'lbl', for: 'rail-name' }, '路線名'), name),
+      h('div', { class: 'row' }, h('label', { class: 'lbl', for: 'rail-company' }, '会社名（同じ会社名の駅・路線を同社扱いにする）'), company),
       h('div', { class: 'row' }, h('label', { class: 'lbl' }, '種類'), railTypeChips(rail.type, (k) => upd((r) => { r.type = k; }))),
     );
+    const file = h('input', { type: 'file', accept: 'image/*', style: { display: 'none' }, onchange: async () => {
+      const f = file.files[0]; if (!f) return;
+      try { const url = await imageToDataURL(f, 96, 'image/png'); upd((r) => { r.logo = url; }); } catch (e) { toast('画像を読み込めませんでした'); }
+    } });
+    parts.push(h('div', { class: 'row' }, h('label', { class: 'lbl' }, '路線ロゴ（設定すると記号・電車アイコンより優先）'),
+      h('div', { class: 'logo-row' },
+        rail.logo ? h('img', { src: rail.logo, alt: '', class: 'logo-prev' }) : h('span', { class: 'logo-prev empty' }, rail.type === 'metro' ? '記号' : '電車'),
+        h('button', { class: 'btn', onclick: () => file.click() }, icon('upload'), rail.logo ? '変更' : 'アップロード'),
+        rail.logo ? h('button', { class: 'btn', onclick: () => upd((r) => { delete r.logo; }) }, '外す') : null, file)));
     if (rail.type === 'metro') {
       const sym = h('input', { type: 'text', id: 'rail-sym', maxlength: 3, value: rail.symbol || '', placeholder: '例：G', onchange: () => upd((r) => { r.symbol = sym.value.trim(); }) });
       parts.push(metroColorRow(rail.color || METRO_COLORS[5], (c, live) => { if (!live) upd((r) => { r.color = c; }); }),
         h('div', { class: 'row' }, h('label', { class: 'lbl', for: 'rail-sym' }, '路線記号（駅のマークに表示。空なら路線名の頭文字）'), sym));
-    } else {
-      const file = h('input', { type: 'file', accept: 'image/*', style: { display: 'none' }, onchange: async () => {
-        const f = file.files[0]; if (!f) return;
-        try { const url = await imageToDataURL(f, 96, 'image/png'); upd((r) => { r.logo = url; }); } catch (e) { toast('画像を読み込めませんでした'); }
-      } });
-      parts.push(h('div', { class: 'row' }, h('label', { class: 'lbl' }, '路線のアイコン（駅のマークに使われます）'),
-        h('div', { class: 'logo-row' },
-          rail.logo ? h('img', { src: rail.logo, alt: '', class: 'logo-prev' }) : h('span', { class: 'logo-prev empty' }, '電車'),
-          h('button', { class: 'btn', onclick: () => file.click() }, icon('upload'), rail.logo ? '変更' : 'アップロード'),
-          rail.logo ? h('button', { class: 'btn', onclick: () => upd((r) => { delete r.logo; }) }, '外す') : null, file)));
     }
     parts.push(h('div', { class: 'row' }, h('label', { class: 'lbl' }, '線路全体の高さ'),
       seg2([['地上', 0], ['高架', 1], ['地下', -1]], null, (lv) => commit((tx) => { for (const id of rail.nodes) if (tx.linesOf(id).size < 2) tx.edit(id).lv = lv; }))));
